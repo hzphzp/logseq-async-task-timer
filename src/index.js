@@ -1,10 +1,98 @@
 import "@logseq/libs";
 
-const PRESET_MINUTES = [3, 5, 10, 15, 30];
+const PRESET_MINUTES = [3, 5, 10, 15, 30, 1440, 4320];
+const STORAGE_KEY = "logseq-async-task-timer-data";
 
 let timers = new Map();
 let timerIdCounter = 0;
 let _pendingBlock = null;
+
+// ─── Persistence ───
+
+function saveTimers() {
+  try {
+    const data = [];
+    for (const [, t] of timers) {
+      data.push({
+        id: t.id,
+        blockUuid: t.blockUuid,
+        blockContent: t.blockContent,
+        totalSeconds: t.totalSeconds,
+        status: t.status,
+        expiresAt: t.expiresAt,
+      });
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+
+function startTimerInterval(timer) {
+  timer.intervalId = setInterval(() => {
+    timer.remaining = Math.ceil((timer.expiresAt - Date.now()) / 1000);
+    if (timer.remaining <= 0) {
+      clearInterval(timer.intervalId);
+      timer.intervalId = null;
+      timer.remaining = 0;
+      timer.status = "expired";
+      saveTimers();
+      onTimerExpired(timer);
+    }
+  }, 1000);
+}
+
+function restoreTimers() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) return;
+
+    const expiredOnRestore = [];
+
+    for (const item of data) {
+      if (!item.blockUuid || !item.expiresAt) continue;
+      const id = ++timerIdCounter;
+      const remaining = Math.ceil((item.expiresAt - Date.now()) / 1000);
+
+      const timer = {
+        id,
+        blockUuid: item.blockUuid,
+        blockContent: item.blockContent || "",
+        totalSeconds: item.totalSeconds || 0,
+        remaining: Math.max(0, remaining),
+        status: remaining <= 0 ? "expired" : "running",
+        expiresAt: item.expiresAt,
+        intervalId: null,
+      };
+
+      timers.set(id, timer);
+
+      if (timer.status === "running") {
+        startTimerInterval(timer);
+      } else {
+        expiredOnRestore.push(timer);
+      }
+    }
+
+    saveTimers();
+
+    if (expiredOnRestore.length > 0) {
+      setTimeout(() => {
+        playAlertSound();
+        const count = expiredOnRestore.length;
+        logseq.UI.showMsg(
+          `⏰ 有 ${count} 个异步任务在你离开期间已到期！`,
+          "warning",
+          { timeout: 15000 }
+        );
+        renderExpiredList();
+        logseq.showMainUI({ autoFocus: true });
+      }, 2000);
+    }
+  } catch (e) {
+    console.warn("restoreTimers:", e);
+  }
+}
 
 // ─── Utilities ───
 
@@ -22,6 +110,12 @@ function escapeHtml(str) {
 function formatTime(sec) {
   const m = Math.floor(sec / 60), s = sec % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatMinutes(m) {
+  if (m >= 1440 && m % 1440 === 0) return `${m / 1440}天`;
+  if (m >= 60 && m % 60 === 0) return `${m / 60}小时`;
+  return `${m}分钟`;
 }
 
 function playAlertSound() {
@@ -67,23 +161,20 @@ function createTimer(blockUuid, blockContent, minutes) {
     id, blockUuid, blockContent,
     totalSeconds,
     remaining: totalSeconds,
+    expiresAt: Date.now() + totalSeconds * 1000,
     status: "running", intervalId: null,
   };
 
-  timer.intervalId = setInterval(() => {
-    timer.remaining--;
-    if (timer.remaining <= 0) {
-      clearInterval(timer.intervalId);
-      timer.intervalId = null;
-      timer.status = "expired";
-      onTimerExpired(timer);
-    }
-  }, 1000);
-
+  startTimerInterval(timer);
   timers.set(id, timer);
+  saveTimers();
   addClockMarker(blockUuid);
-  const label = minutes >= 1 ? `${minutes} 分钟` : `${totalSeconds} 秒`;
+  const label = minutes < 1 ? `${totalSeconds} 秒` : formatMinutes(minutes);
   logseq.UI.showMsg(`⏱️ 已设置 ${label} 后提醒`, "success", { timeout: 2000 });
+}
+
+function getExpiredTimers() {
+  return [...timers.values()].filter(t => t.status === "expired");
 }
 
 function onTimerExpired(timer) {
@@ -91,14 +182,12 @@ function onTimerExpired(timer) {
 
   playAlertSound();
 
-  // Logseq in-app notification (always works)
   logseq.UI.showMsg(
     `⏰ 异步任务到期！\n\n「${label}」\n\n倒计时已结束，请检查任务进度！`,
     "warning",
     { timeout: 30000 }
   );
 
-  // System desktop notification
   try {
     if ("Notification" in window && Notification.permission === "granted") {
       const n = new Notification("⏰ 异步任务到期", {
@@ -109,9 +198,17 @@ function onTimerExpired(timer) {
     }
   } catch (_) {}
 
-  // Show expired dialog in plugin UI
-  renderExpiredDialog(timer);
+  renderExpiredList();
   logseq.showMainUI({ autoFocus: true });
+}
+
+function refreshAfterAction() {
+  const expired = getExpiredTimers();
+  if (expired.length > 0) {
+    renderExpiredList();
+  } else {
+    logseq.hideMainUI();
+  }
 }
 
 async function completeTimer(id) {
@@ -127,6 +224,7 @@ async function completeTimer(id) {
     }
   } catch (e) { console.warn("completeTimer:", e); }
   timers.delete(id);
+  saveTimers();
   logseq.UI.showMsg("✅ 任务已标记完成!", "success", { timeout: 2000 });
 }
 
@@ -136,17 +234,11 @@ function snoozeTimer(id, minutes) {
   if (timer.intervalId) clearInterval(timer.intervalId);
   timer.remaining = minutes * 60;
   timer.totalSeconds = minutes * 60;
+  timer.expiresAt = Date.now() + minutes * 60 * 1000;
   timer.status = "running";
-  timer.intervalId = setInterval(() => {
-    timer.remaining--;
-    if (timer.remaining <= 0) {
-      clearInterval(timer.intervalId);
-      timer.intervalId = null;
-      timer.status = "expired";
-      onTimerExpired(timer);
-    }
-  }, 1000);
-  logseq.UI.showMsg(`⏱️ 再等 ${minutes} 分钟`, "success", { timeout: 2000 });
+  startTimerInterval(timer);
+  saveTimers();
+  logseq.UI.showMsg(`⏱️ 再等 ${formatMinutes(minutes)}`, "success", { timeout: 2000 });
 }
 
 async function dismissTimer(id) {
@@ -155,6 +247,7 @@ async function dismissTimer(id) {
   if (timer.intervalId) clearInterval(timer.intervalId);
   await removeClockMarker(timer.blockUuid);
   timers.delete(id);
+  saveTimers();
 }
 
 // ─── Render ───
@@ -169,7 +262,7 @@ function renderPickerDialog() {
         <div class="task">${taskText}</div>
         <div class="presets">
           ${PRESET_MINUTES.map(m =>
-            `<button class="preset-btn" data-minutes="${m}">${m}<span>分钟</span></button>`
+            `<button class="preset-btn" data-minutes="${m}">${formatMinutes(m)}</button>`
           ).join("")}
         </div>
         <div class="custom-row">
@@ -188,23 +281,34 @@ function renderPickerDialog() {
   }, 100);
 }
 
-function renderExpiredDialog(timer) {
-  const taskText = escapeHtml(truncate(timer.blockContent, 60));
-  document.getElementById("app").innerHTML = `
-    <div class="overlay" id="overlay-bg">
-      <div class="dialog expired-dialog">
-        <div class="title">⏰ 异步任务到期</div>
+function renderExpiredList() {
+  const expired = getExpiredTimers();
+  if (expired.length === 0) return;
+
+  const countLabel = expired.length > 1 ? ` (${expired.length} 项)` : "";
+  const items = expired.map(timer => {
+    const taskText = escapeHtml(truncate(timer.blockContent, 60));
+    return `
+      <div class="expired-item">
         <div class="task">${taskText}</div>
-        <div class="expired-hint">倒计时已结束，请检查该任务是否已完成</div>
         <div class="expired-actions">
           <button class="action-btn done-btn" data-action="done" data-id="${timer.id}">✅ 已完成，标记 DONE</button>
           <div class="snooze-row">
             ${PRESET_MINUTES.map(m =>
-              `<button class="action-btn snooze-btn" data-action="snooze" data-id="${timer.id}" data-minutes="${m}">再等${m}分钟</button>`
+              `<button class="action-btn snooze-btn" data-action="snooze" data-id="${timer.id}" data-minutes="${m}">再等${formatMinutes(m)}</button>`
             ).join("")}
           </div>
           <button class="action-btn dismiss-btn" data-action="dismiss" data-id="${timer.id}">暂时忽略</button>
         </div>
+      </div>`;
+  }).join("");
+
+  document.getElementById("app").innerHTML = `
+    <div class="overlay" id="overlay-bg">
+      <div class="dialog expired-dialog">
+        <div class="title">⏰ 异步任务到期${countLabel}</div>
+        <div class="expired-hint">倒计时已结束，请检查以下任务是否已完成</div>
+        <div class="expired-list">${items}</div>
       </div>
     </div>`;
 }
@@ -249,7 +353,7 @@ function setupEvents() {
       if (action === "done") await completeTimer(parseInt(id));
       else if (action === "snooze") snoozeTimer(parseInt(id), parseFloat(minutes));
       else if (action === "dismiss") await dismissTimer(parseInt(id));
-      logseq.hideMainUI();
+      refreshAfterAction();
       return;
     }
 
@@ -337,6 +441,8 @@ function main() {
   if ("Notification" in window && Notification.permission === "default") {
     Notification.requestPermission();
   }
+
+  restoreTimers();
 }
 
 logseq.ready(main).catch(console.error);
