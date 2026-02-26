@@ -8,6 +8,9 @@ on:
 env:
   PLUGIN_NAME: logseq-async-task-timer
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
