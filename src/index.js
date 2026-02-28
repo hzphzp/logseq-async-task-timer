@@ -77,7 +77,8 @@ function restoreTimers() {
     saveTimers();
 
     if (expiredOnRestore.length > 0) {
-      setTimeout(() => {
+      setTimeout(async () => {
+        for (const t of expiredOnRestore) await refreshBlockContent(t);
         playAlertSound();
         const count = expiredOnRestore.length;
         logseq.UI.showMsg(
@@ -177,7 +178,18 @@ function getExpiredTimers() {
   return [...timers.values()].filter(t => t.status === "expired");
 }
 
-function onTimerExpired(timer) {
+async function refreshBlockContent(timer) {
+  try {
+    const block = await logseq.Editor.getBlock(timer.blockUuid);
+    if (block && block.content) {
+      timer.blockContent = block.content;
+      saveTimers();
+    }
+  } catch (_) {}
+}
+
+async function onTimerExpired(timer) {
+  await refreshBlockContent(timer);
   const label = truncate(timer.blockContent, 40);
 
   playAlertSound();
@@ -401,11 +413,15 @@ function main() {
 
   logseq.Editor.registerSlashCommand("异步任务计时", async () => {
     const block = await logseq.Editor.getCurrentBlock();
-    if (block) openPickerDialog(block.uuid, block.content);
+    if (!block) return;
+    const editingContent = await logseq.Editor.getEditingBlockContent();
+    openPickerDialog(block.uuid, editingContent || block.content);
   });
   logseq.Editor.registerSlashCommand("Async Timer", async () => {
     const block = await logseq.Editor.getCurrentBlock();
-    if (block) openPickerDialog(block.uuid, block.content);
+    if (!block) return;
+    const editingContent = await logseq.Editor.getEditingBlockContent();
+    openPickerDialog(block.uuid, editingContent || block.content);
   });
 
   logseq.Editor.registerBlockContextMenuItem("⏱️ 设置异步提醒", async ({ uuid }) => {
