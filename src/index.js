@@ -310,6 +310,11 @@ function renderExpiredList() {
               `<button class="action-btn snooze-btn" data-action="snooze" data-id="${timer.id}" data-minutes="${m}">再等${formatMinutes(m)}</button>`
             ).join("")}
           </div>
+          <div class="snooze-custom-row">
+            <input type="number" class="snooze-custom-input" data-id="${timer.id}" min="0.1" step="0.1" placeholder="自定义" />
+            <span class="unit">分钟</span>
+            <button class="action-btn snooze-custom-btn" data-id="${timer.id}">再等</button>
+          </div>
           <button class="action-btn dismiss-btn" data-action="dismiss" data-id="${timer.id}">暂时忽略</button>
         </div>
       </div>`;
@@ -358,6 +363,20 @@ function setupEvents() {
       return;
     }
 
+    // Custom snooze button in expired dialog
+    const snoozeCustomBtn = e.target.closest(".snooze-custom-btn");
+    if (snoozeCustomBtn) {
+      const id = parseInt(snoozeCustomBtn.dataset.id);
+      const input = document.querySelector(`.snooze-custom-input[data-id="${id}"]`);
+      if (input) {
+        const val = parseFloat(input.value);
+        if (!val || val <= 0) { input.style.borderColor = "#ef5350"; input.focus(); return; }
+        snoozeTimer(id, val);
+        refreshAfterAction();
+      }
+      return;
+    }
+
     // Action buttons in expired dialog
     const actionBtn = e.target.closest("[data-action]");
     if (actionBtn) {
@@ -388,9 +407,15 @@ function setupEvents() {
       _pendingBlock = null;
       logseq.hideMainUI();
     }
-    // Enter in custom input starts timer
     if (e.key === "Enter" && e.target.id === "custom-input") {
       startCustomTimer();
+    }
+    if (e.key === "Enter" && e.target.classList.contains("snooze-custom-input")) {
+      const id = parseInt(e.target.dataset.id);
+      const val = parseFloat(e.target.value);
+      if (!val || val <= 0) { e.target.style.borderColor = "#ef5350"; return; }
+      snoozeTimer(id, val);
+      refreshAfterAction();
     }
   });
 }
