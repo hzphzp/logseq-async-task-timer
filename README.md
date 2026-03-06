@@ -28,7 +28,7 @@ No more forgetting about delegated tasks. No more constantly checking. Just set 
 - **Multi-expired list**: When multiple timers expire, they show as a list — handling one won't lose the others
 - **Auto DONE**: "Mark complete" automatically changes TODO/DOING/LATER/NOW → DONE and removes the ⏰ marker
 - **Multiple timers**: Run as many concurrent timers as you need
-- **Timer panel**: Click the toolbar clock icon to see all active timers sorted by remaining time, click any item to jump to the block
+- **Timer panel**: Click the toolbar clock icon to see all active timers sorted by remaining time, click any item to jump to the block. Expired tasks show inline ✅ Done and ✕ Dismiss buttons so you never lose track of them
 - **Persistent timers**: Timers survive Logseq restarts — expired tasks trigger alerts on next launch
 - **i18n**: English by default, Chinese available via plugin settings. Auto-detects Logseq language preference
 
@@ -131,7 +131,7 @@ Then load the plugin folder in Logseq as described above.
 - **多任务到期列表**：多个任务同时到期时以列表展示，处理一个不会丢失其他的提醒
 - **自动标记 DONE**：点击"已完成"会自动将 TODO/DOING/LATER/NOW 改为 DONE，并移除 ⏰
 - **多任务并行**：可以同时运行多个计时器
-- **计时器面板**：点击顶栏闹钟图标查看所有计时任务，按剩余时间排序，点击任一条可跳转到对应 block
+- **计时器面板**：点击顶栏闹钟图标查看所有计时任务，按剩余时间排序，点击任一条可跳转到对应 block。到期任务直接显示 ✅ 完成和 ✕ 忽略按钮，不怕错过提醒弹窗
 - **重启不丢失**：计时器数据持久化保存，重启 Logseq 后自动恢复，离开期间到期的任务会立即弹窗提醒
 - **多语言支持**：默认英文界面，可在插件设置中切换为中文，也会自动检测 Logseq 语言偏好
 

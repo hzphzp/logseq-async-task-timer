@@ -406,10 +406,18 @@ function renderTimerPanel() {
 
   const items = all.map(ti => {
     const taskText = escapeHtml(truncate(ti.blockContent, 50));
-    const timeDisplay = ti.status === "expired"
-      ? `<span class="panel-time panel-expired">${t("timerExpired")}</span>`
-      : `<span class="panel-time">${formatTime(ti.remaining)}</span>`;
-    return `<div class="panel-item" data-uuid="${ti.blockUuid}">${timeDisplay}<span class="panel-task">${taskText}</span></div>`;
+    if (ti.status === "expired") {
+      return `<div class="panel-item panel-item-expired">
+        <span class="panel-time panel-expired">${t("timerExpired")}</span>
+        <span class="panel-task panel-task-link" data-uuid="${ti.blockUuid}">${taskText}</span>
+        <button class="panel-done-btn" data-action="done" data-id="${ti.id}" title="${t("markDone")}">✅</button>
+        <button class="panel-dismiss-btn" data-action="dismiss" data-id="${ti.id}" title="${t("dismiss")}">✕</button>
+      </div>`;
+    }
+    return `<div class="panel-item" data-uuid="${ti.blockUuid}">
+      <span class="panel-time">${formatTime(ti.remaining)}</span>
+      <span class="panel-task">${taskText}</span>
+    </div>`;
   }).join("");
 
   document.getElementById("app").innerHTML = `
@@ -467,6 +475,19 @@ function setupEvents() {
       return;
     }
 
+    const panelActionBtn = e.target.closest(".panel-done-btn, .panel-dismiss-btn");
+    if (panelActionBtn) {
+      const { action, id } = panelActionBtn.dataset;
+      if (action === "done") await completeTimer(parseInt(id));
+      else if (action === "dismiss") await dismissTimer(parseInt(id));
+      if (timers.size > 0) {
+        renderTimerPanel();
+      } else {
+        logseq.hideMainUI();
+      }
+      return;
+    }
+
     const actionBtn = e.target.closest("[data-action]");
     if (actionBtn) {
       const { action, id, minutes } = actionBtn.dataset;
@@ -477,7 +498,17 @@ function setupEvents() {
       return;
     }
 
-    const panelItem = e.target.closest(".panel-item");
+    const taskLink = e.target.closest(".panel-task-link");
+    if (taskLink) {
+      const uuid = taskLink.dataset.uuid;
+      if (uuid) {
+        logseq.hideMainUI();
+        logseq.Editor.scrollToBlockInPage(uuid);
+      }
+      return;
+    }
+
+    const panelItem = e.target.closest(".panel-item:not(.panel-item-expired)");
     if (panelItem) {
       const uuid = panelItem.dataset.uuid;
       if (uuid) {
