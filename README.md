@@ -34,21 +34,20 @@ No more forgetting about delegated tasks. No more constantly checking. Just set 
 
 ## Screenshots
 
-### Timer panel — sorted by remaining time, click to jump
-
-![Timer Panel](./images/timer-panel.png)
-
-### Setting a timer
-
-![Setting a timer](./images/设置截图.png)
-
-### Timer expired notification
-
-![Notification 1](./images/提醒1.png)
-
-![Notification 2](./images/提醒2.png)
-
-![Notification 3](./images/提醒3.png)
+<table>
+<tr>
+<td width="50%"><strong>Setting a timer</strong><br><img src="./images/设置截图.png" width="360"></td>
+<td width="50%"><strong>Timer panel (click to jump)</strong><br><img src="./images/timer-panel.png" width="360"></td>
+</tr>
+<tr>
+<td><strong>Expired — in-app popup</strong><br><img src="./images/提醒1.png" width="360"></td>
+<td><strong>Expired — action dialog</strong><br><img src="./images/提醒2.png" width="360"></td>
+</tr>
+<tr>
+<td><strong>Expired — desktop notification</strong><br><img src="./images/提醒3.png" width="360"></td>
+<td></td>
+</tr>
+</table>
 
 ## Usage
 
