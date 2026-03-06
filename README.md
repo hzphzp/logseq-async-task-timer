@@ -20,16 +20,23 @@ No more forgetting about delegated tasks. No more constantly checking. Just set 
 
 ## Features
 
-- **Quick presets**: 3, 5, 10, 15, or 30 minute timers with one click
+- **Quick presets**: 3, 5, 10, 15, 30 min / 1 day / 3 day timers with one click
 - **Custom duration**: Enter any value (supports decimals, e.g. `0.5` = 30 seconds)
 - **Visual marker**: Adds ⏰ to the block so you can see at a glance which tasks are being timed
 - **Multi-channel alerts**: In-app popup + system desktop notification + audio alert
-- **Expiry dialog**: When time's up, a dialog lets you mark DONE / snooze / dismiss
+- **Expiry dialog**: When time's up, a dialog lets you mark DONE / snooze / dismiss — with both preset and custom snooze durations
+- **Multi-expired list**: When multiple timers expire, they show as a list — handling one won't lose the others
 - **Auto DONE**: "Mark complete" automatically changes TODO/DOING/LATER/NOW → DONE and removes the ⏰ marker
 - **Multiple timers**: Run as many concurrent timers as you need
-- **Toolbar button**: Click the clock icon to see all active timers
+- **Timer panel**: Click the toolbar clock icon to see all active timers sorted by remaining time, click any item to jump to the block
+- **Persistent timers**: Timers survive Logseq restarts — expired tasks trigger alerts on next launch
+- **i18n**: English by default, Chinese available via plugin settings. Auto-detects Logseq language preference
 
 ## Screenshots
+
+### Timer panel — sorted by remaining time, click to jump
+
+![Timer Panel](./images/timer-panel.png)
 
 ### Setting a timer
 
@@ -47,24 +54,30 @@ No more forgetting about delegated tasks. No more constantly checking. Just set 
 
 ### 3 ways to start a timer
 
-1. **Slash command** — Type `/异步任务计时` or `/Async Timer` in any block
-2. **Block context menu** — Right-click a block → `⏱️ 设置异步提醒`
+1. **Slash command** — Type `/Async Timer` or `/异步任务计时` in any block
+2. **Block context menu** — Right-click a block → `⏱️ Set Async Reminder`
 3. **Toolbar** — Click the ⏱️ icon in the top toolbar to view active timers
 
 ### Workflow
 
 1. Write a task in Logseq (e.g. `TODO Ask AI to refactor the login module`)
 2. Delegate it, then trigger the timer on that block
-3. Pick a preset (3/5/10/15/30 min) or enter a custom duration
+3. Pick a preset (3/5/10/15/30 min, 1d, 3d) or enter a custom duration
 4. The block gets a ⏰ marker, and you continue with other work
 5. When the timer expires:
    - A popup dialog appears showing which task is due
    - A desktop notification is sent
    - An alert sound plays
 6. Check the task:
-   - **Done?** → Click "✅ 已完成" to mark it DONE
-   - **Not yet?** → Click a snooze button to wait a few more minutes
-   - **Don't care?** → Click "暂时忽略" to dismiss
+   - **Done?** → Click "✅ Done, mark DONE"
+   - **Not yet?** → Click a snooze preset or enter a custom snooze duration
+   - **Don't care?** → Click "Dismiss"
+
+### Settings
+
+Go to `Plugins` → `Async Task Timer` → `Settings`:
+
+- **Language**: `auto` (detect from Logseq) / `en` / `zh`
 
 ## Installation
 
@@ -111,20 +124,23 @@ Then load the plugin folder in Logseq as described above.
 
 ### 功能特性
 
-- **快捷预设**：一键设置 3 / 5 / 10 / 15 / 30 分钟倒计时
+- **快捷预设**：一键设置 3 / 5 / 10 / 15 / 30 分钟 / 1天 / 3天 倒计时
 - **自定义时长**：支持小数输入（如 `0.5` = 30 秒，`0.1` = 6 秒）
 - **可视标记**：设置计时后自动在 block 后添加 ⏰，一眼就能看到哪些任务在计时
 - **多重提醒**：到期后同时触发 应用内弹窗 + 系统桌面通知 + 提示音
-- **到期操作**：弹窗中可以选择 标记完成 / 再等几分钟 / 暂时忽略
+- **到期操作**：弹窗中可以选择 标记完成 / 再等几分钟（预设或自定义）/ 暂时忽略
+- **多任务到期列表**：多个任务同时到期时以列表展示，处理一个不会丢失其他的提醒
 - **自动标记 DONE**：点击"已完成"会自动将 TODO/DOING/LATER/NOW 改为 DONE，并移除 ⏰
 - **多任务并行**：可以同时运行多个计时器
-- **工具栏按钮**：点击顶栏闹钟图标查看所有进行中的计时任务
+- **计时器面板**：点击顶栏闹钟图标查看所有计时任务，按剩余时间排序，点击任一条可跳转到对应 block
+- **重启不丢失**：计时器数据持久化保存，重启 Logseq 后自动恢复，离开期间到期的任务会立即弹窗提醒
+- **多语言支持**：默认英文界面，可在插件设置中切换为中文，也会自动检测 Logseq 语言偏好
 
 ### 使用方法
 
 #### 三种启动方式
 
-1. **斜杠命令** — 在任意 block 中输入 `/异步任务计时` 或 `/Async Timer`
+1. **斜杠命令** — 在任意 block 中输入 `/Async Timer` 或 `/异步任务计时`
 2. **右键菜单** — 右键点击 block → 选择 `⏱️ 设置异步提醒`
 3. **工具栏** — 点击顶部工具栏的 ⏱️ 图标查看活跃计时器
 
@@ -132,7 +148,7 @@ Then load the plugin folder in Logseq as described above.
 
 1. 在 Logseq 中写一条任务，例如 `TODO 让 AI 重构登录模块`
 2. 把任务交给 AI 或实习生后，在这个 block 上触发计时
-3. 选择一个预设时间（3/5/10/15/30 分钟）或输入自定义时长
+3. 选择一个预设时间（3/5/10/15/30 分钟、1天、3天）或输入自定义时长
 4. Block 后面出现 ⏰ 标记，你继续做自己的其他任务
 5. 倒计时结束后：
    - 弹出对话框，显示是哪个任务到期了
@@ -140,8 +156,14 @@ Then load the plugin folder in Logseq as described above.
    - 播放提示音
 6. 检查任务进度：
    - **完成了？** → 点击「✅ 已完成，标记 DONE」
-   - **还没完成？** → 点击贪睡按钮，再等几分钟
+   - **还没完成？** → 点击预设贪睡按钮或输入自定义延长时间
    - **暂时不管？** → 点击「暂时忽略」
+
+#### 设置
+
+进入 `插件` → `Async Task Timer` → `设置`：
+
+- **Language / 界面语言**：`auto`（自动检测）/ `en`（英文）/ `zh`（中文）
 
 ### 安装方式
 
