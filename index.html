@@ -182,6 +182,37 @@
     .panel-done-btn:hover { background: #4caf50; color: #fff; transform: scale(1.1); }
     .panel-dismiss-btn { background: #f5f5f5; color: #999; font-weight: 700; }
     .panel-dismiss-btn:hover { background: #ef5350; color: #fff; transform: scale(1.1); }
+    .panel-snooze-toggle { background: #e3f2fd; border: none; border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer; transition: all .15s; flex-shrink: 0; }
+    .panel-snooze-toggle:hover { background: #4a90d9; color: #fff; transform: scale(1.1); }
+    .panel-item-wrap { display: flex; flex-direction: column; gap: 0; }
+    .panel-snooze-area {
+      padding: 10px 12px; background: #f0f7ff; border-radius: 0 0 10px 10px;
+      border: 1.5px solid #bbdefb; border-top: none;
+      animation: pop .2s ease;
+    }
+    .panel-snooze-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+    .panel-snooze-preset {
+      padding: 5px 10px; border: 1.5px solid #90caf9; border-radius: 6px;
+      background: #fff; color: #1976d2; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .panel-snooze-preset:hover { background: #4a90d9; color: #fff; border-color: #4a90d9; }
+    .panel-snooze-custom { display: flex; gap: 6px; align-items: center; }
+    .panel-snooze-input {
+      flex: 1; padding: 6px 10px; border: 1.5px solid #90caf9; border-radius: 6px;
+      font-size: 13px; font-weight: 600; text-align: center; outline: none;
+      -moz-appearance: textfield;
+    }
+    .panel-snooze-input::-webkit-outer-spin-button,
+    .panel-snooze-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .panel-snooze-input:focus { border-color: #4a90d9; }
+    .panel-snooze-custom .unit { font-size: 12px; color: #999; }
+    .panel-snooze-go {
+      padding: 6px 12px; border: none; border-radius: 6px;
+      background: #4a90d9; color: #fff; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .panel-snooze-go:hover { background: #3a7bc8; }
   </style>
 </head>
 <body>

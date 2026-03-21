@@ -94,17 +94,75 @@ function formatMinutes(m) {
 
 // ─── Persistence ───
 
+const DATA_PAGE = "logseq-async-task-timer-data";
+
+function encodeData(data) {
+  const json = JSON.stringify(data);
+  const bytes = new TextEncoder().encode(json);
+  return btoa(Array.from(bytes, (b) => String.fromCodePoint(b)).join(""));
+}
+
+function decodeData(str) {
+  const bytes = Uint8Array.from(atob(str), (c) => c.codePointAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function serializeTimers() {
+  const data = [];
+  for (const [, ti] of timers) {
+    data.push({
+      id: ti.id, blockUuid: ti.blockUuid, blockContent: ti.blockContent,
+      totalSeconds: ti.totalSeconds, status: ti.status, expiresAt: ti.expiresAt,
+    });
+  }
+  return data;
+}
+
 function saveTimers() {
+  const data = serializeTimers();
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
+  saveTimersToGraph(data);
+}
+
+async function saveTimersToGraph(data) {
   try {
-    const data = [];
-    for (const [, ti] of timers) {
-      data.push({
-        id: ti.id, blockUuid: ti.blockUuid, blockContent: ti.blockContent,
-        totalSeconds: ti.totalSeconds, status: ti.status, expiresAt: ti.expiresAt,
-      });
+    const encoded = encodeData(data);
+    let page = await logseq.Editor.getPage(DATA_PAGE);
+    if (!page) {
+      page = await logseq.Editor.createPage(DATA_PAGE, {},
+        { createFirstBlock: true, redirect: false });
+      await new Promise(r => setTimeout(r, 300));
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    const blocks = await logseq.Editor.getPageBlocksTree(DATA_PAGE);
+    if (blocks && blocks.length > 0) {
+      await logseq.Editor.updateBlock(blocks[0].uuid, encoded);
+    } else {
+      await logseq.Editor.appendBlockInPage(DATA_PAGE, encoded);
+    }
+  } catch (e) {
+    console.warn("saveTimersToGraph:", e);
+  }
+}
+
+async function loadTimerData() {
+  try {
+    const blocks = await logseq.Editor.getPageBlocksTree(DATA_PAGE);
+    if (blocks && blocks.length > 0 && blocks[0].content) {
+      const content = blocks[0].content.trim();
+      if (content) {
+        const data = decodeData(content);
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    }
   } catch (_) {}
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data)) return data;
+    }
+  } catch (_) {}
+  return null;
 }
 
 function startTimerInterval(timer) {
@@ -121,12 +179,10 @@ function startTimerInterval(timer) {
   }, 1000);
 }
 
-function restoreTimers() {
+async function restoreTimers() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data)) return;
+    const data = await loadTimerData();
+    if (!data) return;
 
     const expiredOnRestore = [];
 
@@ -407,11 +463,26 @@ function renderTimerPanel() {
   const items = all.map(ti => {
     const taskText = escapeHtml(truncate(ti.blockContent, 50));
     if (ti.status === "expired") {
-      return `<div class="panel-item panel-item-expired">
-        <span class="panel-time panel-expired">${t("timerExpired")}</span>
-        <span class="panel-task panel-task-link" data-uuid="${ti.blockUuid}">${taskText}</span>
-        <button class="panel-done-btn" data-action="done" data-id="${ti.id}" title="${t("markDone")}">✅</button>
-        <button class="panel-dismiss-btn" data-action="dismiss" data-id="${ti.id}" title="${t("dismiss")}">✕</button>
+      return `<div class="panel-item-wrap">
+        <div class="panel-item panel-item-expired">
+          <span class="panel-time panel-expired">${t("timerExpired")}</span>
+          <span class="panel-task panel-task-link" data-uuid="${ti.blockUuid}">${taskText}</span>
+          <button class="panel-done-btn" data-action="done" data-id="${ti.id}" title="${t("markDone")}">✅</button>
+          <button class="panel-snooze-toggle" data-id="${ti.id}" title="${t("snoozeWait")}">⏱</button>
+          <button class="panel-dismiss-btn" data-action="dismiss" data-id="${ti.id}" title="${t("dismiss")}">✕</button>
+        </div>
+        <div class="panel-snooze-area" id="panel-snooze-${ti.id}" style="display:none">
+          <div class="panel-snooze-presets">
+            ${PRESET_MINUTES.map(m =>
+              `<button class="panel-snooze-preset" data-action="snooze" data-id="${ti.id}" data-minutes="${m}">${formatMinutes(m)}</button>`
+            ).join("")}
+          </div>
+          <div class="panel-snooze-custom">
+            <input type="number" class="panel-snooze-input" data-id="${ti.id}" min="0.1" step="0.1" placeholder="${t("custom")}" />
+            <span class="unit">${t("minutes")}</span>
+            <button class="panel-snooze-go" data-id="${ti.id}">${t("snoozeCustom")}</button>
+          </div>
+        </div>
       </div>`;
     }
     return `<div class="panel-item" data-uuid="${ti.blockUuid}">
@@ -471,6 +542,36 @@ function setupEvents() {
         if (!val || val <= 0) { input.style.borderColor = "#ef5350"; input.focus(); return; }
         snoozeTimer(id, val);
         refreshAfterAction();
+      }
+      return;
+    }
+
+    const snoozeToggle = e.target.closest(".panel-snooze-toggle");
+    if (snoozeToggle) {
+      const id = snoozeToggle.dataset.id;
+      const area = document.getElementById(`panel-snooze-${id}`);
+      if (area) area.style.display = area.style.display === "none" ? "block" : "none";
+      return;
+    }
+
+    const panelSnoozePreset = e.target.closest(".panel-snooze-preset");
+    if (panelSnoozePreset) {
+      const id = parseInt(panelSnoozePreset.dataset.id);
+      const minutes = parseFloat(panelSnoozePreset.dataset.minutes);
+      snoozeTimer(id, minutes);
+      if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
+      return;
+    }
+
+    const panelSnoozeGo = e.target.closest(".panel-snooze-go");
+    if (panelSnoozeGo) {
+      const id = parseInt(panelSnoozeGo.dataset.id);
+      const input = document.querySelector(`.panel-snooze-input[data-id="${id}"]`);
+      if (input) {
+        const val = parseFloat(input.value);
+        if (!val || val <= 0) { input.style.borderColor = "#ef5350"; input.focus(); return; }
+        snoozeTimer(id, val);
+        if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
       }
       return;
     }
@@ -544,6 +645,13 @@ function setupEvents() {
       if (!val || val <= 0) { e.target.style.borderColor = "#ef5350"; return; }
       snoozeTimer(id, val);
       refreshAfterAction();
+    }
+    if (e.key === "Enter" && e.target.classList.contains("panel-snooze-input")) {
+      const id = parseInt(e.target.dataset.id);
+      const val = parseFloat(e.target.value);
+      if (!val || val <= 0) { e.target.style.borderColor = "#ef5350"; return; }
+      snoozeTimer(id, val);
+      if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
     }
   });
 }
@@ -647,7 +755,7 @@ async function main() {
     Notification.requestPermission();
   }
 
-  restoreTimers();
+  await restoreTimers();
 }
 
 logseq.ready(main).catch(console.error);
