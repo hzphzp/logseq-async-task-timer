@@ -95,6 +95,7 @@ function formatMinutes(m) {
 // ─── Persistence ───
 
 const DATA_PAGE = "logseq-async-task-timer-data";
+let _saveTimersPromise = Promise.resolve();
 
 function encodeData(data) {
   const json = JSON.stringify(data);
@@ -121,7 +122,10 @@ function serializeTimers() {
 function saveTimers() {
   const data = serializeTimers();
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
-  saveTimersToGraph(data);
+  _saveTimersPromise = _saveTimersPromise
+    .catch(() => {})
+    .then(() => saveTimersToGraph(data));
+  return _saveTimersPromise;
 }
 
 async function saveTimersToGraph(data) {
@@ -151,7 +155,10 @@ async function loadTimerData() {
       const content = blocks[0].content.trim();
       if (content) {
         const data = decodeData(content);
-        if (Array.isArray(data) && data.length > 0) return data;
+        if (Array.isArray(data)) {
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
+          return data;
+        }
       }
     }
   } catch (_) {}
@@ -166,15 +173,15 @@ async function loadTimerData() {
 }
 
 function startTimerInterval(timer) {
-  timer.intervalId = setInterval(() => {
+  timer.intervalId = setInterval(async () => {
     timer.remaining = Math.ceil((timer.expiresAt - Date.now()) / 1000);
     if (timer.remaining <= 0) {
       clearInterval(timer.intervalId);
       timer.intervalId = null;
       timer.remaining = 0;
       timer.status = "expired";
-      saveTimers();
-      onTimerExpired(timer);
+      await saveTimers();
+      await onTimerExpired(timer);
     }
   }, 1000);
 }
@@ -209,7 +216,7 @@ async function restoreTimers() {
       }
     }
 
-    saveTimers();
+    await saveTimers();
 
     if (expiredOnRestore.length > 0) {
       setTimeout(async () => {
@@ -279,7 +286,7 @@ async function removeClockMarker(uuid) {
 
 // ─── Timer ───
 
-function createTimer(blockUuid, blockContent, minutes) {
+async function createTimer(blockUuid, blockContent, minutes) {
   const id = ++timerIdCounter;
   const totalSeconds = Math.max(1, Math.round(minutes * 60));
   const timer = {
@@ -291,8 +298,8 @@ function createTimer(blockUuid, blockContent, minutes) {
 
   startTimerInterval(timer);
   timers.set(id, timer);
-  saveTimers();
-  addClockMarker(blockUuid);
+  await saveTimers();
+  await addClockMarker(blockUuid);
   const label = minutes < 1 ? t("seconds", totalSeconds) : formatMinutes(minutes);
   logseq.UI.showMsg(t("timerSet", label), "success", { timeout: 2000 });
 }
@@ -306,7 +313,7 @@ async function refreshBlockContent(timer) {
     const block = await logseq.Editor.getBlock(timer.blockUuid);
     if (block && block.content) {
       timer.blockContent = block.content;
-      saveTimers();
+      await saveTimers();
     }
   } catch (_) {}
 }
@@ -355,11 +362,11 @@ async function completeTimer(id) {
     }
   } catch (e) { console.warn("completeTimer:", e); }
   timers.delete(id);
-  saveTimers();
+  await saveTimers();
   logseq.UI.showMsg(t("taskDone"), "success", { timeout: 2000 });
 }
 
-function snoozeTimer(id, minutes) {
+async function snoozeTimer(id, minutes) {
   const timer = timers.get(id);
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
@@ -368,7 +375,7 @@ function snoozeTimer(id, minutes) {
   timer.expiresAt = Date.now() + minutes * 60 * 1000;
   timer.status = "running";
   startTimerInterval(timer);
-  saveTimers();
+  await saveTimers();
   logseq.UI.showMsg(t("snoozeMsg", formatMinutes(minutes)), "success", { timeout: 2000 });
 }
 
@@ -378,7 +385,7 @@ async function dismissTimer(id) {
   if (timer.intervalId) clearInterval(timer.intervalId);
   await removeClockMarker(timer.blockUuid);
   timers.delete(id);
-  saveTimers();
+  await saveTimers();
 }
 
 // ─── Render ───
@@ -504,7 +511,7 @@ function renderTimerPanel() {
 
 // ─── Events ───
 
-function startCustomTimer() {
+async function startCustomTimer() {
   const input = document.getElementById("custom-input");
   if (!input || !_pendingBlock) return;
   const val = parseFloat(input.value);
@@ -513,7 +520,7 @@ function startCustomTimer() {
     input.focus();
     return;
   }
-  createTimer(_pendingBlock.uuid, _pendingBlock.content, val);
+  await createTimer(_pendingBlock.uuid, _pendingBlock.content, val);
   _pendingBlock = null;
   logseq.hideMainUI();
 }
@@ -522,14 +529,14 @@ function setupEvents() {
   document.addEventListener("click", async (e) => {
     const presetBtn = e.target.closest(".preset-btn");
     if (presetBtn && _pendingBlock) {
-      createTimer(_pendingBlock.uuid, _pendingBlock.content, parseFloat(presetBtn.dataset.minutes));
+      await createTimer(_pendingBlock.uuid, _pendingBlock.content, parseFloat(presetBtn.dataset.minutes));
       _pendingBlock = null;
       logseq.hideMainUI();
       return;
     }
 
     if (e.target.id === "custom-start-btn") {
-      startCustomTimer();
+      await startCustomTimer();
       return;
     }
 
@@ -540,7 +547,7 @@ function setupEvents() {
       if (input) {
         const val = parseFloat(input.value);
         if (!val || val <= 0) { input.style.borderColor = "#ef5350"; input.focus(); return; }
-        snoozeTimer(id, val);
+        await snoozeTimer(id, val);
         refreshAfterAction();
       }
       return;
@@ -558,7 +565,7 @@ function setupEvents() {
     if (panelSnoozePreset) {
       const id = parseInt(panelSnoozePreset.dataset.id);
       const minutes = parseFloat(panelSnoozePreset.dataset.minutes);
-      snoozeTimer(id, minutes);
+      await snoozeTimer(id, minutes);
       if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
       return;
     }
@@ -570,7 +577,7 @@ function setupEvents() {
       if (input) {
         const val = parseFloat(input.value);
         if (!val || val <= 0) { input.style.borderColor = "#ef5350"; input.focus(); return; }
-        snoozeTimer(id, val);
+        await snoozeTimer(id, val);
         if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
       }
       return;
@@ -593,7 +600,7 @@ function setupEvents() {
     if (actionBtn) {
       const { action, id, minutes } = actionBtn.dataset;
       if (action === "done") await completeTimer(parseInt(id));
-      else if (action === "snooze") snoozeTimer(parseInt(id), parseFloat(minutes));
+      else if (action === "snooze") await snoozeTimer(parseInt(id), parseFloat(minutes));
       else if (action === "dismiss") await dismissTimer(parseInt(id));
       refreshAfterAction();
       return;
@@ -631,26 +638,26 @@ function setupEvents() {
     }
   });
 
-  document.addEventListener("keydown", (e) => {
+  document.addEventListener("keydown", async (e) => {
     if (e.key === "Escape") {
       _pendingBlock = null;
       logseq.hideMainUI();
     }
     if (e.key === "Enter" && e.target.id === "custom-input") {
-      startCustomTimer();
+      await startCustomTimer();
     }
     if (e.key === "Enter" && e.target.classList.contains("snooze-custom-input")) {
       const id = parseInt(e.target.dataset.id);
       const val = parseFloat(e.target.value);
       if (!val || val <= 0) { e.target.style.borderColor = "#ef5350"; return; }
-      snoozeTimer(id, val);
+      await snoozeTimer(id, val);
       refreshAfterAction();
     }
     if (e.key === "Enter" && e.target.classList.contains("panel-snooze-input")) {
       const id = parseInt(e.target.dataset.id);
       const val = parseFloat(e.target.value);
       if (!val || val <= 0) { e.target.style.borderColor = "#ef5350"; return; }
-      snoozeTimer(id, val);
+      await snoozeTimer(id, val);
       if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
     }
   });
