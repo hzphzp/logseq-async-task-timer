@@ -1,6 +1,6 @@
 {
   "name": "logseq-async-task-timer",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Set countdown reminders on delegated/async tasks. Get notified when it's time to check back.",
   "main": "dist/index.html",
   "scripts": {

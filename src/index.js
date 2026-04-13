@@ -94,14 +94,12 @@ function formatMinutes(m) {
 
 // ─── Persistence ───
 
-const DATA_PAGE = "logseq-async-task-timer-data";
-let _saveTimersPromise = Promise.resolve();
-
-function encodeData(data) {
-  const json = JSON.stringify(data);
-  const bytes = new TextEncoder().encode(json);
-  return btoa(Array.from(bytes, (b) => String.fromCodePoint(b)).join(""));
-}
+const LEGACY_DATA_PAGE = "logseq-async-task-timer-data";
+const TIMER_PROP_EXPIRES_AT = "async-timer-expires-at";
+const TIMER_PROP_TOTAL_SECONDS = "async-timer-total-seconds";
+let _persistTimerPromise = Promise.resolve();
+let _syncFromGraphTimer = null;
+let _isRestoringTimers = false;
 
 function decodeData(str) {
   const bytes = Uint8Array.from(atob(str), (c) => c.codePointAt(0));
@@ -112,8 +110,12 @@ function serializeTimers() {
   const data = [];
   for (const [, ti] of timers) {
     data.push({
-      id: ti.id, blockUuid: ti.blockUuid, blockContent: ti.blockContent,
-      totalSeconds: ti.totalSeconds, status: ti.status, expiresAt: ti.expiresAt,
+      id: ti.id,
+      blockUuid: ti.blockUuid,
+      blockContent: ti.blockContent,
+      totalSeconds: ti.totalSeconds,
+      status: ti.status,
+      expiresAt: ti.expiresAt,
     });
   }
   return data;
@@ -122,54 +124,223 @@ function serializeTimers() {
 function saveTimers() {
   const data = serializeTimers();
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
-  _saveTimersPromise = _saveTimersPromise
-    .catch(() => {})
-    .then(() => saveTimersToGraph(data));
-  return _saveTimersPromise;
+  return Promise.resolve();
 }
 
-async function saveTimersToGraph(data) {
+function getTimerByBlockUuid(blockUuid) {
+  for (const [, ti] of timers) {
+    if (ti.blockUuid === blockUuid) return ti;
+  }
+  return null;
+}
+
+function normalizeQueryBlocks(result) {
+  if (!Array.isArray(result)) return [];
+  const blocks = [];
+  for (const item of result) {
+    if (Array.isArray(item)) {
+      for (const inner of item) {
+        if (inner && typeof inner === "object" && inner.uuid) blocks.push(inner);
+      }
+    } else if (item && typeof item === "object" && item.uuid) {
+      blocks.push(item);
+    }
+  }
+  return blocks;
+}
+
+function getBlockPropertyValue(block, key) {
+  const candidates = [
+    key,
+    key.toLowerCase(),
+    key.replace(/-/g, "_"),
+    key.toLowerCase().replace(/-/g, "_"),
+  ];
+  for (const source of [block?.properties, block?.meta?.properties]) {
+    if (!source || typeof source !== "object") continue;
+    for (const candidate of candidates) {
+      if (candidate in source) return source[candidate];
+    }
+  }
+  return null;
+}
+
+function getTimerMetaFromBlock(block) {
+  const expiresAtRaw = getBlockPropertyValue(block, TIMER_PROP_EXPIRES_AT);
+  if (expiresAtRaw == null || expiresAtRaw === "") return null;
+  const expiresAt = Number(expiresAtRaw);
+  if (!Number.isFinite(expiresAt)) return null;
+  const totalSecondsRaw = getBlockPropertyValue(block, TIMER_PROP_TOTAL_SECONDS);
+  const totalSeconds = Number.isFinite(Number(totalSecondsRaw))
+    ? Number(totalSecondsRaw)
+    : 0;
+  return { expiresAt, totalSeconds: Math.max(0, totalSeconds) };
+}
+
+function hasClockMarker(block) {
+  return typeof block?.content === "string" && /\s*⏰\s*$/.test(block.content);
+}
+
+function flattenBlocks(blocks) {
+  const result = [];
+  for (const block of blocks || []) {
+    result.push(block);
+    if (block?.children?.length) {
+      result.push(...flattenBlocks(block.children));
+    }
+  }
+  return result;
+}
+
+function parseLegacyDataLine(line) {
+  const text = line.trim().replace(/^- /, "");
+  if (!text || text.startsWith("<<<<<<<") || text.startsWith("=======") || text.startsWith(">>>>>>>")) {
+    return null;
+  }
   try {
-    const encoded = encodeData(data);
-    let page = await logseq.Editor.getPage(DATA_PAGE);
-    if (!page) {
-      page = await logseq.Editor.createPage(DATA_PAGE, {},
-        { createFirstBlock: true, redirect: false });
-      await new Promise(r => setTimeout(r, 300));
-    }
-    const blocks = await logseq.Editor.getPageBlocksTree(DATA_PAGE);
-    if (blocks && blocks.length > 0) {
-      await logseq.Editor.updateBlock(blocks[0].uuid, encoded);
-    } else {
-      await logseq.Editor.appendBlockInPage(DATA_PAGE, encoded);
-    }
-  } catch (e) {
-    console.warn("saveTimersToGraph:", e);
+    const data = decodeData(text);
+    return Array.isArray(data) ? data : null;
+  } catch (_) {
+    return null;
   }
 }
 
-async function loadTimerData() {
+async function loadLegacyTimerData() {
+  const byUuid = new Map();
+
   try {
-    const blocks = await logseq.Editor.getPageBlocksTree(DATA_PAGE);
-    if (blocks && blocks.length > 0 && blocks[0].content) {
-      const content = blocks[0].content.trim();
-      if (content) {
-        const data = decodeData(content);
-        if (Array.isArray(data)) {
-          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
-          return data;
+    const blocks = await logseq.Editor.getPageBlocksTree(LEGACY_DATA_PAGE);
+    for (const block of flattenBlocks(blocks)) {
+      for (const line of String(block.content || "").split("\n")) {
+        const data = parseLegacyDataLine(line);
+        if (!data) continue;
+        for (const item of data) {
+          if (!item?.blockUuid || !item?.expiresAt) continue;
+          const prev = byUuid.get(item.blockUuid);
+          if (!prev || Number(item.expiresAt) > Number(prev.expiresAt)) {
+            byUuid.set(item.blockUuid, item);
+          }
         }
       }
     }
   } catch (_) {}
+
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
-      if (Array.isArray(data)) return data;
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (!item?.blockUuid || !item?.expiresAt) continue;
+          const prev = byUuid.get(item.blockUuid);
+          if (!prev || Number(item.expiresAt) > Number(prev.expiresAt)) {
+            byUuid.set(item.blockUuid, item);
+          }
+        }
+      }
     }
   } catch (_) {}
-  return null;
+
+  return [...byUuid.values()];
+}
+
+function queueTimerPersistence(task) {
+  _persistTimerPromise = _persistTimerPromise
+    .catch(() => {})
+    .then(task);
+  return _persistTimerPromise;
+}
+
+function persistTimerToBlock(timer) {
+  return queueTimerPersistence(async () => {
+    await logseq.Editor.upsertBlockProperty(timer.blockUuid, TIMER_PROP_EXPIRES_AT, String(timer.expiresAt));
+    await logseq.Editor.upsertBlockProperty(timer.blockUuid, TIMER_PROP_TOTAL_SECONDS, String(timer.totalSeconds));
+  });
+}
+
+function removeTimerPropsFromBlock(blockUuid) {
+  return queueTimerPersistence(async () => {
+    try { await logseq.Editor.removeBlockProperty(blockUuid, TIMER_PROP_EXPIRES_AT); } catch (_) {}
+    try { await logseq.Editor.removeBlockProperty(blockUuid, TIMER_PROP_TOTAL_SECONDS); } catch (_) {}
+  });
+}
+
+async function queryTimerPropertyBlocks() {
+  try {
+    const result = await logseq.DB.datascriptQuery(`
+      [:find (pull ?b [*])
+       :where
+       [?b :block/properties ?props]]
+    `);
+    return normalizeQueryBlocks(result).filter((block) => getTimerMetaFromBlock(block));
+  } catch (e) {
+    console.warn("queryTimerPropertyBlocks:", e);
+    return [];
+  }
+}
+
+async function queryClockMarkerBlocks() {
+  try {
+    const result = await logseq.DB.datascriptQuery(`
+      [:find (pull ?b [*])
+       :where
+       [?b :block/content ?content]]
+    `);
+    return normalizeQueryBlocks(result).filter(hasClockMarker);
+  } catch (e) {
+    console.warn("queryClockMarkerBlocks:", e);
+    return [];
+  }
+}
+
+async function loadTimerData() {
+  const byUuid = new Map();
+
+  for (const block of await queryTimerPropertyBlocks()) {
+    const meta = getTimerMetaFromBlock(block);
+    if (!meta) continue;
+    byUuid.set(block.uuid, {
+      blockUuid: block.uuid,
+      blockContent: block.content || "",
+      totalSeconds: meta.totalSeconds,
+      expiresAt: meta.expiresAt,
+      source: "block",
+    });
+  }
+
+  for (const block of await queryClockMarkerBlocks()) {
+    if (byUuid.has(block.uuid)) continue;
+    byUuid.set(block.uuid, {
+      blockUuid: block.uuid,
+      blockContent: block.content || "",
+      totalSeconds: 0,
+      expiresAt: Date.now() - 1000,
+      source: "marker",
+    });
+  }
+
+  for (const item of await loadLegacyTimerData()) {
+    if (!item?.blockUuid || byUuid.has(item.blockUuid)) continue;
+    const block = await logseq.Editor.getBlock(item.blockUuid);
+    if (!block) continue;
+    if (!hasClockMarker(block) && !getTimerMetaFromBlock(block)) continue;
+    byUuid.set(item.blockUuid, {
+      blockUuid: item.blockUuid,
+      blockContent: block.content || item.blockContent || "",
+      totalSeconds: Number(item.totalSeconds) || 0,
+      expiresAt: Number(item.expiresAt) || (Date.now() - 1000),
+      source: "legacy",
+    });
+  }
+
+  return [...byUuid.values()];
+}
+
+async function cleanupLegacyTimerPage() {
+  try {
+    const page = await logseq.Editor.getPage(LEGACY_DATA_PAGE);
+    if (page) await logseq.Editor.deletePage(LEGACY_DATA_PAGE);
+  } catch (_) {}
 }
 
 function startTimerInterval(timer) {
@@ -181,42 +352,74 @@ function startTimerInterval(timer) {
       timer.remaining = 0;
       timer.status = "expired";
       await saveTimers();
+      await persistTimerToBlock(timer);
       await onTimerExpired(timer);
     }
   }, 1000);
 }
 
-async function restoreTimers() {
+async function restoreTimers({ notifyExpired = true } = {}) {
+  if (_isRestoringTimers) return;
+  _isRestoringTimers = true;
   try {
     const data = await loadTimerData();
-    if (!data) return;
-
+    const existingByUuid = new Map([...timers.values()].map((ti) => [ti.blockUuid, ti]));
     const expiredOnRestore = [];
+    const recoveredTimers = [];
+    const nextTimers = new Map();
 
     for (const item of data) {
       if (!item.blockUuid || !item.expiresAt) continue;
-      const id = ++timerIdCounter;
+      const existing = existingByUuid.get(item.blockUuid);
       const remaining = Math.ceil((item.expiresAt - Date.now()) / 1000);
 
       const timer = {
-        id, blockUuid: item.blockUuid,
+        id: existing?.id ?? ++timerIdCounter,
+        blockUuid: item.blockUuid,
         blockContent: item.blockContent || "",
         totalSeconds: item.totalSeconds || 0,
         remaining: Math.max(0, remaining),
         status: remaining <= 0 ? "expired" : "running",
-        expiresAt: item.expiresAt, intervalId: null,
+        expiresAt: item.expiresAt,
+        intervalId: null,
       };
 
-      timers.set(id, timer);
+      nextTimers.set(timer.id, timer);
 
       if (timer.status === "running") {
-        startTimerInterval(timer);
+        continue;
       } else {
-        expiredOnRestore.push(timer);
+        if (
+          notifyExpired &&
+          (!existing || existing.status !== "expired" || existing.expiresAt !== timer.expiresAt)
+        ) {
+          expiredOnRestore.push(timer);
+        }
+      }
+
+      if (item.source === "marker" || item.source === "legacy") {
+        recoveredTimers.push(timer);
       }
     }
 
+    for (const [, timer] of timers) {
+      if (timer.intervalId) clearInterval(timer.intervalId);
+    }
+
+    timers = nextTimers;
+
+    for (const [, timer] of timers) {
+      if (timer.status === "running") {
+        startTimerInterval(timer);
+      }
+    }
+
+    for (const timer of recoveredTimers) {
+      await persistTimerToBlock(timer);
+    }
+
     await saveTimers();
+    if (timers.size > 0) await cleanupLegacyTimerPage();
 
     if (expiredOnRestore.length > 0) {
       setTimeout(async () => {
@@ -229,14 +432,36 @@ async function restoreTimers() {
     }
   } catch (e) {
     console.warn("restoreTimers:", e);
+  } finally {
+    _isRestoringTimers = false;
   }
+}
+
+function scheduleRestoreTimers(opts = {}) {
+  clearTimeout(_syncFromGraphTimer);
+  _syncFromGraphTimer = setTimeout(() => {
+    restoreTimers(opts);
+  }, 500);
+}
+
+function isTimerRelevantBlock(block) {
+  return !!(
+    block?.uuid &&
+    (
+      hasClockMarker(block) ||
+      getTimerMetaFromBlock(block) ||
+      getTimerByBlockUuid(block.uuid)
+    )
+  );
 }
 
 // ─── Utilities ───
 
 function truncate(str, len = 40) {
   if (!str) return t("noContent");
-  return str.replace(/^(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
+  return str
+    .replace(/(?:^|\n)(?:async-timer-expires-at|async-timer-total-seconds)::[^\n]*/gi, "")
+    .replace(/^(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
     .replace(/⏰\s*$/, "").trim().slice(0, len) || t("noContent");
 }
 
@@ -269,7 +494,7 @@ function playAlertSound() {
 async function addClockMarker(uuid) {
   try {
     const block = await logseq.Editor.getBlock(uuid);
-    if (block && !block.content.includes("⏰")) {
+    if (block && !hasClockMarker(block)) {
       await logseq.Editor.updateBlock(uuid, block.content.trimEnd() + " ⏰");
     }
   } catch (_) {}
@@ -278,8 +503,8 @@ async function addClockMarker(uuid) {
 async function removeClockMarker(uuid) {
   try {
     const block = await logseq.Editor.getBlock(uuid);
-    if (block && block.content.includes("⏰")) {
-      await logseq.Editor.updateBlock(uuid, block.content.replace(/\s*⏰/g, "").trimEnd());
+    if (block && hasClockMarker(block)) {
+      await logseq.Editor.updateBlock(uuid, block.content.replace(/\s*⏰\s*$/, "").trimEnd());
     }
   } catch (_) {}
 }
@@ -287,19 +512,26 @@ async function removeClockMarker(uuid) {
 // ─── Timer ───
 
 async function createTimer(blockUuid, blockContent, minutes) {
-  const id = ++timerIdCounter;
   const totalSeconds = Math.max(1, Math.round(minutes * 60));
-  const timer = {
-    id, blockUuid, blockContent, totalSeconds,
+  let timer = getTimerByBlockUuid(blockUuid);
+  if (timer?.intervalId) clearInterval(timer.intervalId);
+  timer = {
+    id: timer?.id ?? ++timerIdCounter,
+    blockUuid,
+    blockContent,
+    totalSeconds,
     remaining: totalSeconds,
     expiresAt: Date.now() + totalSeconds * 1000,
-    status: "running", intervalId: null,
+    status: "running",
+    intervalId: null,
   };
 
+  timers = new Map([...timers].filter(([, ti]) => ti.blockUuid !== blockUuid));
   startTimerInterval(timer);
-  timers.set(id, timer);
-  await saveTimers();
+  timers.set(timer.id, timer);
   await addClockMarker(blockUuid);
+  await persistTimerToBlock(timer);
+  saveTimers();
   const label = minutes < 1 ? t("seconds", totalSeconds) : formatMinutes(minutes);
   logseq.UI.showMsg(t("timerSet", label), "success", { timeout: 2000 });
 }
@@ -362,7 +594,8 @@ async function completeTimer(id) {
     }
   } catch (e) { console.warn("completeTimer:", e); }
   timers.delete(id);
-  await saveTimers();
+  await removeTimerPropsFromBlock(timer.blockUuid);
+  saveTimers();
   logseq.UI.showMsg(t("taskDone"), "success", { timeout: 2000 });
 }
 
@@ -375,7 +608,8 @@ async function snoozeTimer(id, minutes) {
   timer.expiresAt = Date.now() + minutes * 60 * 1000;
   timer.status = "running";
   startTimerInterval(timer);
-  await saveTimers();
+  await persistTimerToBlock(timer);
+  saveTimers();
   logseq.UI.showMsg(t("snoozeMsg", formatMinutes(minutes)), "success", { timeout: 2000 });
 }
 
@@ -385,7 +619,8 @@ async function dismissTimer(id) {
   if (timer.intervalId) clearInterval(timer.intervalId);
   await removeClockMarker(timer.blockUuid);
   timers.delete(id);
-  await saveTimers();
+  await removeTimerPropsFromBlock(timer.blockUuid);
+  saveTimers();
 }
 
 // ─── Render ───
@@ -717,7 +952,26 @@ async function main() {
     top: "0", left: "0", width: "100vw", height: "100vh",
   });
 
+  logseq.provideStyle(`
+    .block-properties > div:has([data-key="async-timer-expires-at"]),
+    .block-properties > div:has([data-key="async-timer-total-seconds"]),
+    .block-properties > div:has(a[data-ref="async-timer-expires-at"]),
+    .block-properties > div:has(a[data-ref="async-timer-total-seconds"]),
+    .block-properties [data-key="async-timer-expires-at"],
+    .block-properties [data-key="async-timer-total-seconds"],
+    .block-properties a[data-ref="async-timer-expires-at"],
+    .block-properties a[data-ref="async-timer-total-seconds"] {
+      display: none !important;
+    }
+  `);
+
   setupEvents();
+
+  logseq.DB.onChanged(({ blocks }) => {
+    if ((blocks || []).some(isTimerRelevantBlock)) {
+      scheduleRestoreTimers({ notifyExpired: true });
+    }
+  });
 
   logseq.Editor.registerSlashCommand("Async Timer", async () => {
     const block = await logseq.Editor.getCurrentBlock();
