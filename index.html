@@ -105,7 +105,20 @@
       padding: 16px; background: #fffaf0; border: 1px solid #ffe0b2;
       border-radius: 10px;
     }
+    .expired-item-current {
+      background: #fff3e0; border: 2px solid #ff9800;
+      box-shadow: 0 0 0 4px rgba(255,152,0,.22), 0 10px 28px rgba(255,152,0,.22);
+    }
+    .expired-current-badge {
+      display: inline-block; margin-bottom: 10px; padding: 4px 10px;
+      border-radius: 999px; background: #ff9800; color: #fff;
+      font-size: 12px; font-weight: 700;
+    }
     .expired-item .task { margin-bottom: 12px; }
+    .expired-overdue {
+      margin: -4px 0 12px; color: #e65100;
+      font-size: 13px; font-weight: 700;
+    }
     .expired-actions { display: flex; flex-direction: column; gap: 10px; }
 
     .action-btn {
@@ -163,9 +176,9 @@
     }
     .panel-time {
       font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums;
-      color: #4a90d9; min-width: 60px; text-align: center; white-space: nowrap;
+      color: #4a90d9; min-width: 82px; text-align: center; white-space: nowrap;
     }
-    .panel-time.panel-expired { color: #e65100; font-size: 14px; }
+    .panel-time.panel-expired { color: #e65100; font-size: 13px; }
     .panel-task {
       flex: 1; font-size: 14px; color: #555; line-height: 1.5;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -184,6 +197,8 @@
     .panel-dismiss-btn:hover { background: #ef5350; color: #fff; transform: scale(1.1); }
     .panel-snooze-toggle { background: #e3f2fd; border: none; border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer; transition: all .15s; flex-shrink: 0; }
     .panel-snooze-toggle:hover { background: #4a90d9; color: #fff; transform: scale(1.1); }
+    .panel-reset-toggle { background: #f3e5f5; border: none; border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer; transition: all .15s; flex-shrink: 0; }
+    .panel-reset-toggle:hover { background: #8e24aa; color: #fff; transform: scale(1.1); }
     .panel-item-wrap { display: flex; flex-direction: column; gap: 0; }
     .panel-snooze-area {
       padding: 10px 12px; background: #f0f7ff; border-radius: 0 0 10px 10px;

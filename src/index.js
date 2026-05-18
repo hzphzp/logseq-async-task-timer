@@ -7,6 +7,7 @@ let timers = new Map();
 let timerIdCounter = 0;
 let _pendingBlock = null;
 let _lang = "en";
+let _lastExpiredTimerId = null;
 
 // ─── i18n ───
 
@@ -44,6 +45,9 @@ const I18N = {
     panelTitle: "⏱️ Active Timers",
     panelEmpty: "No active timers",
     panelClickHint: "Click to jump to block",
+    resetTimer: "Reset timer",
+    justExpired: "Just expired",
+    overdueFor: (label) => `Overdue ${label}`,
   },
   zh: {
     noContent: "(无内容)",
@@ -78,6 +82,9 @@ const I18N = {
     panelTitle: "⏱️ 当前计时任务",
     panelEmpty: "暂无进行中的计时任务",
     panelClickHint: "点击跳转到对应 block",
+    resetTimer: "重设计时",
+    justExpired: "刚刚超时",
+    overdueFor: (label) => `已超时 ${label}`,
   },
 };
 
@@ -177,8 +184,41 @@ function getTimerMetaFromBlock(block) {
   return { expiresAt, totalSeconds: Math.max(0, totalSeconds) };
 }
 
-function hasClockMarker(block) {
-  return typeof block?.content === "string" && /\s*⏰\s*$/.test(block.content);
+function extractTimerPropertyLines(content) {
+  return String(content || "")
+    .split("\n")
+    .filter((line) => /^\s*(async-timer-expires-at|async-timer-total-seconds)::/i.test(line));
+}
+
+function mergePreferredContentWithTimerProps(preferredContent, existingContent) {
+  const base = String(preferredContent || "").trimEnd();
+  const timerPropertyLines = extractTimerPropertyLines(existingContent);
+  if (timerPropertyLines.length === 0) return base;
+  return `${base}\n${timerPropertyLines.join("\n")}`;
+}
+
+function mutateFirstLine(content, transform) {
+  const lines = String(content || "").split("\n");
+  if (lines.length === 0) return transform("");
+  lines[0] = transform(lines[0] || "");
+  return lines.join("\n");
+}
+
+function hasClockMarker(blockOrContent) {
+  const content = typeof blockOrContent === "string"
+    ? blockOrContent
+    : blockOrContent?.content;
+  const firstLine = String(content || "").split("\n")[0] || "";
+  return /\s*⏰\s*$/.test(firstLine);
+}
+
+function addClockMarkerToContent(content) {
+  if (hasClockMarker(content)) return String(content || "");
+  return mutateFirstLine(content, (line) => `${line.trimEnd()} ⏰`);
+}
+
+function removeClockMarkerFromContent(content) {
+  return mutateFirstLine(content, (line) => line.replace(/\s*⏰\s*$/, "").trimEnd());
 }
 
 function flattenBlocks(blocks) {
@@ -304,6 +344,7 @@ async function loadTimerData() {
       blockContent: block.content || "",
       totalSeconds: meta.totalSeconds,
       expiresAt: meta.expiresAt,
+      hasMarker: hasClockMarker(block),
       source: "block",
     });
   }
@@ -397,7 +438,11 @@ async function restoreTimers({ notifyExpired = true } = {}) {
         }
       }
 
-      if (item.source === "marker" || item.source === "legacy") {
+      if (
+        item.source === "marker" ||
+        item.source === "legacy" ||
+        (item.source === "block" && !item.hasMarker)
+      ) {
         recoveredTimers.push(timer);
       }
     }
@@ -416,6 +461,7 @@ async function restoreTimers({ notifyExpired = true } = {}) {
 
     for (const timer of recoveredTimers) {
       await persistTimerToBlock(timer);
+      await ensureClockMarker(timer.blockUuid, timer.blockContent);
     }
 
     await saveTimers();
@@ -475,6 +521,16 @@ function formatTime(sec) {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds < 60) return t("seconds", seconds);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return t("min", minutes);
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return t("hour", hours);
+  return t("day", Math.floor(hours / 24));
+}
+
 function playAlertSound() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -495,7 +551,31 @@ async function addClockMarker(uuid) {
   try {
     const block = await logseq.Editor.getBlock(uuid);
     if (block && !hasClockMarker(block)) {
-      await logseq.Editor.updateBlock(uuid, block.content.trimEnd() + " ⏰");
+      await logseq.Editor.updateBlock(uuid, addClockMarkerToContent(block.content));
+    }
+  } catch (_) {}
+}
+
+async function addClockMarkerPreservingContent(uuid, preferredContent = "") {
+  try {
+    const block = await logseq.Editor.getBlock(uuid);
+    const merged = mergePreferredContentWithTimerProps(preferredContent, block?.content || "");
+    if (!merged) return;
+    await logseq.Editor.updateBlock(uuid, addClockMarkerToContent(merged));
+  } catch (_) {}
+}
+
+async function ensureClockMarker(uuid, preferredContent = "") {
+  try {
+    await addClockMarkerPreservingContent(uuid, preferredContent);
+    await new Promise((r) => setTimeout(r, 80));
+    const latest = await logseq.Editor.getBlock(uuid);
+    if (latest && !hasClockMarker(latest)) {
+      const merged = mergePreferredContentWithTimerProps(
+        preferredContent || removeClockMarkerFromContent(latest.content),
+        latest.content,
+      );
+      await logseq.Editor.updateBlock(uuid, addClockMarkerToContent(merged));
     }
   } catch (_) {}
 }
@@ -504,7 +584,7 @@ async function removeClockMarker(uuid) {
   try {
     const block = await logseq.Editor.getBlock(uuid);
     if (block && hasClockMarker(block)) {
-      await logseq.Editor.updateBlock(uuid, block.content.replace(/\s*⏰\s*$/, "").trimEnd());
+      await logseq.Editor.updateBlock(uuid, removeClockMarkerFromContent(block.content));
     }
   } catch (_) {}
 }
@@ -529,8 +609,8 @@ async function createTimer(blockUuid, blockContent, minutes) {
   timers = new Map([...timers].filter(([, ti]) => ti.blockUuid !== blockUuid));
   startTimerInterval(timer);
   timers.set(timer.id, timer);
-  await addClockMarker(blockUuid);
   await persistTimerToBlock(timer);
+  await ensureClockMarker(blockUuid, blockContent);
   saveTimers();
   const label = minutes < 1 ? t("seconds", totalSeconds) : formatMinutes(minutes);
   logseq.UI.showMsg(t("timerSet", label), "success", { timeout: 2000 });
@@ -538,6 +618,31 @@ async function createTimer(blockUuid, blockContent, minutes) {
 
 function getExpiredTimers() {
   return [...timers.values()].filter(ti => ti.status === "expired");
+}
+
+function getOverdueMs(timer, now = Date.now()) {
+  return Math.max(0, now - Number(timer.expiresAt || now));
+}
+
+function formatOverdue(timer, now = Date.now()) {
+  return t("overdueFor", formatDuration(Math.floor(getOverdueMs(timer, now) / 1000)));
+}
+
+function compareByOverdueAsc(a, b, now = Date.now()) {
+  const overdueDiff = getOverdueMs(a, now) - getOverdueMs(b, now);
+  if (overdueDiff !== 0) return overdueDiff;
+  return (a.id || 0) - (b.id || 0);
+}
+
+function compareTimersForPanel(a, b, now = Date.now()) {
+  const aExpired = a.status === "expired";
+  const bExpired = b.status === "expired";
+  if (aExpired && bExpired) return compareByOverdueAsc(a, b, now);
+  if (aExpired) return -1;
+  if (bExpired) return 1;
+  const expiresDiff = Number(a.expiresAt || 0) - Number(b.expiresAt || 0);
+  if (expiresDiff !== 0) return expiresDiff;
+  return (a.id || 0) - (b.id || 0);
 }
 
 async function refreshBlockContent(timer) {
@@ -553,6 +658,7 @@ async function refreshBlockContent(timer) {
 async function onTimerExpired(timer) {
   await refreshBlockContent(timer);
   const label = truncate(timer.blockContent, 40);
+  _lastExpiredTimerId = timer.id;
 
   playAlertSound();
 
@@ -568,7 +674,7 @@ async function onTimerExpired(timer) {
     }
   } catch (_) {}
 
-  renderExpiredList();
+  renderExpiredList(timer.id);
   logseq.showMainUI({ autoFocus: true });
 }
 
@@ -609,6 +715,7 @@ async function snoozeTimer(id, minutes) {
   timer.status = "running";
   startTimerInterval(timer);
   await persistTimerToBlock(timer);
+  await ensureClockMarker(timer.blockUuid, timer.blockContent);
   saveTimers();
   logseq.UI.showMsg(t("snoozeMsg", formatMinutes(minutes)), "success", { timeout: 2000 });
 }
@@ -653,16 +760,26 @@ function renderPickerDialog() {
   }, 100);
 }
 
-function renderExpiredList() {
-  const expired = getExpiredTimers();
+function renderExpiredList(highlightTimerId = null) {
+  const now = Date.now();
+  const expired = getExpiredTimers().sort((a, b) => compareByOverdueAsc(a, b, now));
   if (expired.length === 0) return;
 
+  const effectiveHighlightTimerId = expired.some((timer) => timer.id === highlightTimerId)
+    ? highlightTimerId
+    : expired.some((timer) => timer.id === _lastExpiredTimerId)
+      ? _lastExpiredTimerId
+      : expired[0].id;
   const countLabel = expired.length > 1 ? t("expiredCount", expired.length) : "";
   const items = expired.map(timer => {
+    const isCurrent = timer.id === effectiveHighlightTimerId;
     const taskText = escapeHtml(truncate(timer.blockContent, 60));
+    const overdueText = escapeHtml(formatOverdue(timer, now));
     return `
-      <div class="expired-item">
+      <div class="expired-item${isCurrent ? " expired-item-current" : ""}">
+        ${isCurrent ? `<div class="expired-current-badge">${t("justExpired")}</div>` : ""}
         <div class="task">${taskText}</div>
+        <div class="expired-overdue">${overdueText}</div>
         <div class="expired-actions">
           <button class="action-btn done-btn" data-action="done" data-id="${timer.id}">${t("markDone")}</button>
           <div class="snooze-row">
@@ -690,12 +807,35 @@ function renderExpiredList() {
     </div>`;
 }
 
-function renderTimerPanel() {
-  const all = [...timers.values()].sort((a, b) => {
-    if (a.status === "expired" && b.status !== "expired") return -1;
-    if (a.status !== "expired" && b.status === "expired") return 1;
-    return a.remaining - b.remaining;
+function renderPanelTimerAdjuster(timerId) {
+  return `
+    <div class="panel-snooze-area" id="panel-snooze-${timerId}" style="display:none">
+      <div class="panel-snooze-presets">
+        ${PRESET_MINUTES.map(m =>
+          `<button class="panel-snooze-preset" data-action="snooze" data-id="${timerId}" data-minutes="${m}">${formatMinutes(m)}</button>`
+        ).join("")}
+      </div>
+      <div class="panel-snooze-custom">
+        <input type="number" class="panel-snooze-input" data-id="${timerId}" min="0.1" step="0.1" placeholder="${t("custom")}" />
+        <span class="unit">${t("minutes")}</span>
+        <button class="panel-snooze-go" data-id="${timerId}">${t("snoozeCustom")}</button>
+      </div>
+    </div>`;
+}
+
+function togglePanelSnoozeArea(id) {
+  const allAreas = document.querySelectorAll(".panel-snooze-area");
+  const current = document.getElementById(`panel-snooze-${id}`);
+  const shouldOpen = !!current && current.style.display === "none";
+  allAreas.forEach((area) => {
+    area.style.display = "none";
   });
+  if (current && shouldOpen) current.style.display = "block";
+}
+
+function renderTimerPanel() {
+  const now = Date.now();
+  const all = [...timers.values()].sort((a, b) => compareTimersForPanel(a, b, now));
 
   if (all.length === 0) {
     logseq.UI.showMsg(t("panelEmpty"), "info", { timeout: 2000 });
@@ -705,31 +845,25 @@ function renderTimerPanel() {
   const items = all.map(ti => {
     const taskText = escapeHtml(truncate(ti.blockContent, 50));
     if (ti.status === "expired") {
+      const overdueText = escapeHtml(formatOverdue(ti, now));
       return `<div class="panel-item-wrap">
         <div class="panel-item panel-item-expired">
-          <span class="panel-time panel-expired">${t("timerExpired")}</span>
+          <span class="panel-time panel-expired">${overdueText}</span>
           <span class="panel-task panel-task-link" data-uuid="${ti.blockUuid}">${taskText}</span>
           <button class="panel-done-btn" data-action="done" data-id="${ti.id}" title="${t("markDone")}">✅</button>
           <button class="panel-snooze-toggle" data-id="${ti.id}" title="${t("snoozeWait")}">⏱</button>
           <button class="panel-dismiss-btn" data-action="dismiss" data-id="${ti.id}" title="${t("dismiss")}">✕</button>
         </div>
-        <div class="panel-snooze-area" id="panel-snooze-${ti.id}" style="display:none">
-          <div class="panel-snooze-presets">
-            ${PRESET_MINUTES.map(m =>
-              `<button class="panel-snooze-preset" data-action="snooze" data-id="${ti.id}" data-minutes="${m}">${formatMinutes(m)}</button>`
-            ).join("")}
-          </div>
-          <div class="panel-snooze-custom">
-            <input type="number" class="panel-snooze-input" data-id="${ti.id}" min="0.1" step="0.1" placeholder="${t("custom")}" />
-            <span class="unit">${t("minutes")}</span>
-            <button class="panel-snooze-go" data-id="${ti.id}">${t("snoozeCustom")}</button>
-          </div>
-        </div>
+        ${renderPanelTimerAdjuster(ti.id)}
       </div>`;
     }
-    return `<div class="panel-item" data-uuid="${ti.blockUuid}">
-      <span class="panel-time">${formatTime(ti.remaining)}</span>
-      <span class="panel-task">${taskText}</span>
+    return `<div class="panel-item-wrap">
+      <div class="panel-item" data-uuid="${ti.blockUuid}">
+        <span class="panel-time">${formatTime(ti.remaining)}</span>
+        <span class="panel-task">${taskText}</span>
+        <button class="panel-reset-toggle" data-id="${ti.id}" title="${t("resetTimer")}">⟳</button>
+      </div>
+      ${renderPanelTimerAdjuster(ti.id)}
     </div>`;
   }).join("");
 
@@ -788,11 +922,10 @@ function setupEvents() {
       return;
     }
 
-    const snoozeToggle = e.target.closest(".panel-snooze-toggle");
+    const snoozeToggle = e.target.closest(".panel-snooze-toggle, .panel-reset-toggle");
     if (snoozeToggle) {
       const id = snoozeToggle.dataset.id;
-      const area = document.getElementById(`panel-snooze-${id}`);
-      if (area) area.style.display = area.style.display === "none" ? "block" : "none";
+      togglePanelSnoozeArea(id);
       return;
     }
 
