@@ -48,6 +48,8 @@ const I18N = {
     resetTimer: "Reset timer",
     justExpired: "Just expired",
     overdueFor: (label) => `Overdue ${label}`,
+    clearAllExpired: "🧹 Clear all expired",
+    clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
   },
   zh: {
     noContent: "(无内容)",
@@ -85,6 +87,8 @@ const I18N = {
     resetTimer: "重设计时",
     justExpired: "刚刚超时",
     overdueFor: (label) => `已超时 ${label}`,
+    clearAllExpired: "🧹 清除所有过期",
+    clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
   },
 };
 
@@ -102,6 +106,10 @@ function formatMinutes(m) {
 // ─── Persistence ───
 
 const LEGACY_DATA_PAGE = "logseq-async-task-timer-data";
+// New single-line format: `async-timer:: <expiresAtMs>~<totalSeconds>`.
+// The two-property format below is still read for backward compatibility and
+// gets migrated to the single line on the next write/clear.
+const TIMER_PROP = "async-timer";
 const TIMER_PROP_EXPIRES_AT = "async-timer-expires-at";
 const TIMER_PROP_TOTAL_SECONDS = "async-timer-total-seconds";
 let _persistTimerPromise = Promise.resolve();
@@ -172,7 +180,23 @@ function getBlockPropertyValue(block, key) {
   return null;
 }
 
+function parseCombinedTimerValue(raw) {
+  if (raw == null || raw === "") return null;
+  // Logseq may hand back a string or (if it ever splits) an array.
+  const str = Array.isArray(raw) ? raw.join("~") : String(raw);
+  const [expiresStr, totalStr] = str.split(/[~,]/);
+  const expiresAt = Number(expiresStr);
+  if (!Number.isFinite(expiresAt)) return null;
+  const totalSeconds = Number.isFinite(Number(totalStr)) ? Number(totalStr) : 0;
+  return { expiresAt, totalSeconds: Math.max(0, totalSeconds) };
+}
+
 function getTimerMetaFromBlock(block) {
+  // Preferred: new single-line property.
+  const combined = parseCombinedTimerValue(getBlockPropertyValue(block, TIMER_PROP));
+  if (combined) return combined;
+
+  // Backward compatibility: legacy two-property format.
   const expiresAtRaw = getBlockPropertyValue(block, TIMER_PROP_EXPIRES_AT);
   if (expiresAtRaw == null || expiresAtRaw === "") return null;
   const expiresAt = Number(expiresAtRaw);
@@ -187,7 +211,7 @@ function getTimerMetaFromBlock(block) {
 function extractTimerPropertyLines(content) {
   return String(content || "")
     .split("\n")
-    .filter((line) => /^\s*(async-timer-expires-at|async-timer-total-seconds)::/i.test(line));
+    .filter((line) => /^\s*async-timer(-expires-at|-total-seconds)?::/i.test(line));
 }
 
 function mergePreferredContentWithTimerProps(preferredContent, existingContent) {
@@ -291,52 +315,104 @@ function queueTimerPersistence(task) {
   return _persistTimerPromise;
 }
 
+// Lines we manage inside a block's content. The block markdown is the single
+// source of truth, so we always rebuild the timer lines from scratch (strip then
+// re-add) to guarantee there is never a duplicate property line.
+const TIMER_PROP_LINE_RE = /^\s*async-timer(-expires-at|-total-seconds)?::.*$/i;
+
+// UUIDs the plugin itself just wrote. logseq.DB.onChanged fires for our own
+// writes too; tracking them lets us ignore the echo and avoid a restore cascade.
+const _recentWrites = new Map();
+
+function markWritten(uuid) {
+  if (uuid) _recentWrites.set(uuid, Date.now());
+}
+
+function wasRecentlyWritten(uuid) {
+  const ts = _recentWrites.get(uuid);
+  if (!ts) return false;
+  if (Date.now() - ts > 4000) {
+    _recentWrites.delete(uuid);
+    return false;
+  }
+  return true;
+}
+
+function stripTimerPropLines(content) {
+  return String(content || "")
+    .split("\n")
+    .filter((line) => !TIMER_PROP_LINE_RE.test(line));
+}
+
+function buildTimerContent(content, expiresAt, totalSeconds) {
+  const lines = stripTimerPropLines(content);
+  if (lines.length === 0) lines.push("");
+  lines[0] = addClockMarkerToContent(lines[0]);
+  lines.push(`${TIMER_PROP}:: ${expiresAt}~${totalSeconds}`);
+  return lines.join("\n");
+}
+
 function persistTimerToBlock(timer) {
   return queueTimerPersistence(async () => {
-    await logseq.Editor.upsertBlockProperty(timer.blockUuid, TIMER_PROP_EXPIRES_AT, String(timer.expiresAt));
-    await logseq.Editor.upsertBlockProperty(timer.blockUuid, TIMER_PROP_TOTAL_SECONDS, String(timer.totalSeconds));
+    const block = await logseq.Editor.getBlock(timer.blockUuid);
+    if (!block) return;
+    const content = buildTimerContent(block.content, timer.expiresAt, timer.totalSeconds);
+    markWritten(timer.blockUuid);
+    await logseq.Editor.updateBlock(timer.blockUuid, content);
   });
 }
 
-function removeTimerPropsFromBlock(blockUuid) {
+// Reliably remove every timer artifact (both property lines + the ⏰ marker),
+// optionally flipping the task to DONE. This is what makes "handled on one
+// device → gone on every device" actually hold.
+function clearTimerFromBlock(blockUuid, { toDone = false } = {}) {
   return queueTimerPersistence(async () => {
-    try { await logseq.Editor.removeBlockProperty(blockUuid, TIMER_PROP_EXPIRES_AT); } catch (_) {}
-    try { await logseq.Editor.removeBlockProperty(blockUuid, TIMER_PROP_TOTAL_SECONDS); } catch (_) {}
+    const block = await logseq.Editor.getBlock(blockUuid);
+    if (!block) return;
+    const lines = stripTimerPropLines(block.content);
+    if (lines.length === 0) lines.push("");
+    lines[0] = removeClockMarkerFromContent(lines[0]);
+    if (toDone) {
+      lines[0] = lines[0].replace(/^(\s*)(TODO|DOING|LATER|NOW|WAITING)\s+/i, "$1DONE ");
+    }
+    const content = lines.join("\n").replace(/\s+$/, "");
+    markWritten(blockUuid);
+    await logseq.Editor.updateBlock(blockUuid, content);
   });
 }
 
-async function queryTimerPropertyBlocks() {
+async function runTimerQuery(useFilter) {
+  const query = useFilter
+    ? `[:find (pull ?b [*])
+        :where
+        [?b :block/properties ?props]
+        (or [(contains? ?props :async-timer)]
+            [(contains? ?props :async-timer-expires-at)])]`
+    : `[:find (pull ?b [*])
+        :where
+        [?b :block/properties ?props]]`;
   try {
-    const result = await logseq.DB.datascriptQuery(`
-      [:find (pull ?b [*])
-       :where
-       [?b :block/properties ?props]]
-    `);
+    const result = await logseq.DB.datascriptQuery(query);
     return normalizeQueryBlocks(result).filter((block) => getTimerMetaFromBlock(block));
   } catch (e) {
-    console.warn("queryTimerPropertyBlocks:", e);
+    console.warn("runTimerQuery:", e);
     return [];
   }
 }
 
-async function queryClockMarkerBlocks() {
-  try {
-    const result = await logseq.DB.datascriptQuery(`
-      [:find (pull ?b [*])
-       :where
-       [?b :block/content ?content]]
-    `);
-    return normalizeQueryBlocks(result).filter(hasClockMarker);
-  } catch (e) {
-    console.warn("queryClockMarkerBlocks:", e);
-    return [];
-  }
+// Only pull blocks that actually carry the timer property — never the whole
+// graph. The unfiltered query is a one-off fallback in case this Logseq build
+// stores the property key differently; it self-heals without scanning content.
+async function queryTimerBlocks() {
+  const filtered = await runTimerQuery(true);
+  if (filtered.length > 0) return filtered;
+  return await runTimerQuery(false);
 }
 
 async function loadTimerData() {
   const byUuid = new Map();
 
-  for (const block of await queryTimerPropertyBlocks()) {
+  for (const block of await queryTimerBlocks()) {
     const meta = getTimerMetaFromBlock(block);
     if (!meta) continue;
     byUuid.set(block.uuid, {
@@ -346,31 +422,6 @@ async function loadTimerData() {
       expiresAt: meta.expiresAt,
       hasMarker: hasClockMarker(block),
       source: "block",
-    });
-  }
-
-  for (const block of await queryClockMarkerBlocks()) {
-    if (byUuid.has(block.uuid)) continue;
-    byUuid.set(block.uuid, {
-      blockUuid: block.uuid,
-      blockContent: block.content || "",
-      totalSeconds: 0,
-      expiresAt: Date.now() - 1000,
-      source: "marker",
-    });
-  }
-
-  for (const item of await loadLegacyTimerData()) {
-    if (!item?.blockUuid || byUuid.has(item.blockUuid)) continue;
-    const block = await logseq.Editor.getBlock(item.blockUuid);
-    if (!block) continue;
-    if (!hasClockMarker(block) && !getTimerMetaFromBlock(block)) continue;
-    byUuid.set(item.blockUuid, {
-      blockUuid: item.blockUuid,
-      blockContent: block.content || item.blockContent || "",
-      totalSeconds: Number(item.totalSeconds) || 0,
-      expiresAt: Number(item.expiresAt) || (Date.now() - 1000),
-      source: "legacy",
     });
   }
 
@@ -392,8 +443,8 @@ function startTimerInterval(timer) {
       timer.intervalId = null;
       timer.remaining = 0;
       timer.status = "expired";
-      await saveTimers();
-      await persistTimerToBlock(timer);
+      // expiresAt/total are already on the block; no need to rewrite it here.
+      saveTimers();
       await onTimerExpired(timer);
     }
   }, 1000);
@@ -406,7 +457,6 @@ async function restoreTimers({ notifyExpired = true } = {}) {
     const data = await loadTimerData();
     const existingByUuid = new Map([...timers.values()].map((ti) => [ti.blockUuid, ti]));
     const expiredOnRestore = [];
-    const recoveredTimers = [];
     const nextTimers = new Map();
 
     for (const item of data) {
@@ -427,23 +477,12 @@ async function restoreTimers({ notifyExpired = true } = {}) {
 
       nextTimers.set(timer.id, timer);
 
-      if (timer.status === "running") {
-        continue;
-      } else {
-        if (
-          notifyExpired &&
-          (!existing || existing.status !== "expired" || existing.expiresAt !== timer.expiresAt)
-        ) {
-          expiredOnRestore.push(timer);
-        }
-      }
-
       if (
-        item.source === "marker" ||
-        item.source === "legacy" ||
-        (item.source === "block" && !item.hasMarker)
+        timer.status === "expired" &&
+        notifyExpired &&
+        (!existing || existing.status !== "expired" || existing.expiresAt !== timer.expiresAt)
       ) {
-        recoveredTimers.push(timer);
+        expiredOnRestore.push(timer);
       }
     }
 
@@ -459,22 +498,16 @@ async function restoreTimers({ notifyExpired = true } = {}) {
       }
     }
 
-    for (const timer of recoveredTimers) {
-      await persistTimerToBlock(timer);
-      await ensureClockMarker(timer.blockUuid, timer.blockContent);
-    }
+    // Restore is read-only: it never writes back to blocks, so it can't trigger
+    // an onChanged cascade and can't corrupt markdown. localStorage is only a
+    // best-effort cache, never a source that can revive deleted timers.
+    saveTimers();
 
-    await saveTimers();
-    if (timers.size > 0) await cleanupLegacyTimerPage();
-
+    // Don't blast a modal + alarm for a pile of already-stale timers that synced
+    // in from another device — that was the "flood on open" problem. Just leave a
+    // gentle toast; the toolbar ⏰ panel lists them for one-tap handling.
     if (expiredOnRestore.length > 0) {
-      setTimeout(async () => {
-        for (const ti of expiredOnRestore) await refreshBlockContent(ti);
-        playAlertSound();
-        logseq.UI.showMsg(t("restoreExpired", expiredOnRestore.length), "warning", { timeout: 15000 });
-        renderExpiredList();
-        logseq.showMainUI({ autoFocus: true });
-      }, 2000);
+      logseq.UI.showMsg(t("restoreExpired", expiredOnRestore.length), "warning", { timeout: 8000 });
     }
   } catch (e) {
     console.warn("restoreTimers:", e);
@@ -483,11 +516,41 @@ async function restoreTimers({ notifyExpired = true } = {}) {
   }
 }
 
+// One-time, idempotent migration of legacy two-property timers into the new
+// single-line `async-timer::` format. New-format blocks have no legacy lines and
+// are skipped, so this self-terminates after the first pass. Runs through the
+// Logseq API (not raw file edits) so the in-app DB stays consistent.
+async function migrateLegacyTimers() {
+  try {
+    let migrated = 0;
+    for (const block of await queryTimerBlocks()) {
+      const content = block.content || "";
+      // Never touch blocks carrying git conflict markers.
+      if (/^(<{7}|={7}|>{7})/m.test(content)) continue;
+      const hasLegacy = /(^|\n)\s*async-timer-(expires-at|total-seconds)::/i.test(content);
+      if (!hasLegacy) continue;
+      const meta = getTimerMetaFromBlock(block);
+      if (!meta) continue;
+      markWritten(block.uuid);
+      await logseq.Editor.updateBlock(
+        block.uuid,
+        buildTimerContent(content, meta.expiresAt, meta.totalSeconds),
+      );
+      migrated++;
+    }
+    if (migrated > 0) {
+      console.log(`async-task-timer: migrated ${migrated} legacy timer(s) to single-line format`);
+    }
+  } catch (e) {
+    console.warn("migrateLegacyTimers:", e);
+  }
+}
+
 function scheduleRestoreTimers(opts = {}) {
   clearTimeout(_syncFromGraphTimer);
   _syncFromGraphTimer = setTimeout(() => {
     restoreTimers(opts);
-  }, 500);
+  }, 1200);
 }
 
 function isTimerRelevantBlock(block) {
@@ -506,7 +569,7 @@ function isTimerRelevantBlock(block) {
 function truncate(str, len = 40) {
   if (!str) return t("noContent");
   return str
-    .replace(/(?:^|\n)(?:async-timer-expires-at|async-timer-total-seconds)::[^\n]*/gi, "")
+    .replace(/(?:^|\n)\s*async-timer(?:-expires-at|-total-seconds)?::[^\n]*/gi, "")
     .replace(/^(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
     .replace(/⏰\s*$/, "").trim().slice(0, len) || t("noContent");
 }
@@ -556,30 +619,6 @@ async function addClockMarker(uuid) {
   } catch (_) {}
 }
 
-async function addClockMarkerPreservingContent(uuid, preferredContent = "") {
-  try {
-    const block = await logseq.Editor.getBlock(uuid);
-    const merged = mergePreferredContentWithTimerProps(preferredContent, block?.content || "");
-    if (!merged) return;
-    await logseq.Editor.updateBlock(uuid, addClockMarkerToContent(merged));
-  } catch (_) {}
-}
-
-async function ensureClockMarker(uuid, preferredContent = "") {
-  try {
-    await addClockMarkerPreservingContent(uuid, preferredContent);
-    await new Promise((r) => setTimeout(r, 80));
-    const latest = await logseq.Editor.getBlock(uuid);
-    if (latest && !hasClockMarker(latest)) {
-      const merged = mergePreferredContentWithTimerProps(
-        preferredContent || removeClockMarkerFromContent(latest.content),
-        latest.content,
-      );
-      await logseq.Editor.updateBlock(uuid, addClockMarkerToContent(merged));
-    }
-  } catch (_) {}
-}
-
 async function removeClockMarker(uuid) {
   try {
     const block = await logseq.Editor.getBlock(uuid);
@@ -610,7 +649,6 @@ async function createTimer(blockUuid, blockContent, minutes) {
   startTimerInterval(timer);
   timers.set(timer.id, timer);
   await persistTimerToBlock(timer);
-  await ensureClockMarker(blockUuid, blockContent);
   saveTimers();
   const label = minutes < 1 ? t("seconds", totalSeconds) : formatMinutes(minutes);
   logseq.UI.showMsg(t("timerSet", label), "success", { timeout: 2000 });
@@ -691,16 +729,8 @@ async function completeTimer(id) {
   const timer = timers.get(id);
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
-  try {
-    const block = await logseq.Editor.getBlock(timer.blockUuid);
-    if (block) {
-      const c = block.content.replace(/\s*⏰/g, "")
-        .replace(/^(TODO|DOING|LATER|NOW|WAITING)\s+/i, "DONE ").trimEnd();
-      await logseq.Editor.updateBlock(timer.blockUuid, c);
-    }
-  } catch (e) { console.warn("completeTimer:", e); }
   timers.delete(id);
-  await removeTimerPropsFromBlock(timer.blockUuid);
+  await clearTimerFromBlock(timer.blockUuid, { toDone: true });
   saveTimers();
   logseq.UI.showMsg(t("taskDone"), "success", { timeout: 2000 });
 }
@@ -715,7 +745,6 @@ async function snoozeTimer(id, minutes) {
   timer.status = "running";
   startTimerInterval(timer);
   await persistTimerToBlock(timer);
-  await ensureClockMarker(timer.blockUuid, timer.blockContent);
   saveTimers();
   logseq.UI.showMsg(t("snoozeMsg", formatMinutes(minutes)), "success", { timeout: 2000 });
 }
@@ -724,10 +753,20 @@ async function dismissTimer(id) {
   const timer = timers.get(id);
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
-  await removeClockMarker(timer.blockUuid);
   timers.delete(id);
-  await removeTimerPropsFromBlock(timer.blockUuid);
+  await clearTimerFromBlock(timer.blockUuid);
   saveTimers();
+}
+
+async function dismissAllExpired() {
+  const expired = getExpiredTimers();
+  for (const ti of expired) {
+    if (ti.intervalId) clearInterval(ti.intervalId);
+    timers.delete(ti.id);
+    await clearTimerFromBlock(ti.blockUuid);
+  }
+  saveTimers();
+  logseq.UI.showMsg(t("clearedExpired", expired.length), "success", { timeout: 2000 });
 }
 
 // ─── Render ───
@@ -867,12 +906,18 @@ function renderTimerPanel() {
     </div>`;
   }).join("");
 
+  const expiredCount = all.filter((ti) => ti.status === "expired").length;
+  const clearAllRow = expiredCount > 0
+    ? `<button class="action-btn dismiss-btn" id="dismiss-all-expired">${t("clearAllExpired")}${t("expiredCount", expiredCount)}</button>`
+    : "";
+
   document.getElementById("app").innerHTML = `
     <div class="overlay" id="overlay-bg">
       <div class="dialog panel-dialog">
         <div class="title">${t("panelTitle")}</div>
         <div class="panel-hint">${t("panelClickHint")}</div>
         <div class="panel-list">${items}</div>
+        ${clearAllRow}
         <button class="cancel-btn" id="cancel-btn">${t("cancel")}</button>
       </div>
     </div>`;
@@ -919,6 +964,12 @@ function setupEvents() {
         await snoozeTimer(id, val);
         refreshAfterAction();
       }
+      return;
+    }
+
+    if (e.target.id === "dismiss-all-expired") {
+      await dismissAllExpired();
+      if (timers.size > 0) { renderTimerPanel(); } else { logseq.hideMainUI(); }
       return;
     }
 
@@ -1086,12 +1137,16 @@ async function main() {
   });
 
   logseq.provideStyle(`
+    .block-properties > div:has([data-key="async-timer"]),
     .block-properties > div:has([data-key="async-timer-expires-at"]),
     .block-properties > div:has([data-key="async-timer-total-seconds"]),
+    .block-properties > div:has(a[data-ref="async-timer"]),
     .block-properties > div:has(a[data-ref="async-timer-expires-at"]),
     .block-properties > div:has(a[data-ref="async-timer-total-seconds"]),
+    .block-properties [data-key="async-timer"],
     .block-properties [data-key="async-timer-expires-at"],
     .block-properties [data-key="async-timer-total-seconds"],
+    .block-properties a[data-ref="async-timer"],
     .block-properties a[data-ref="async-timer-expires-at"],
     .block-properties a[data-ref="async-timer-total-seconds"] {
       display: none !important;
@@ -1101,7 +1156,12 @@ async function main() {
   setupEvents();
 
   logseq.DB.onChanged(({ blocks }) => {
-    if ((blocks || []).some(isTimerRelevantBlock)) {
+    // Ignore the echo of our own writes — otherwise every persist/clear would
+    // re-trigger a full restore (the old behavior behind the per-edit lag).
+    const relevant = (blocks || []).filter(
+      (b) => isTimerRelevantBlock(b) && !wasRecentlyWritten(b.uuid)
+    );
+    if (relevant.length > 0) {
       scheduleRestoreTimers({ notifyExpired: true });
     }
   });
@@ -1150,6 +1210,7 @@ async function main() {
   }
 
   await restoreTimers();
+  await migrateLegacyTimers();
 }
 
 logseq.ready(main).catch(console.error);
