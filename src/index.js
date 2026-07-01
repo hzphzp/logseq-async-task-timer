@@ -192,9 +192,19 @@ function parseCombinedTimerValue(raw) {
 }
 
 function getTimerMetaFromBlock(block) {
-  // Preferred: new single-line property.
+  // Preferred: new single-line property (when Logseq surfaces it).
   const combined = parseCombinedTimerValue(getBlockPropertyValue(block, TIMER_PROP));
   if (combined) return combined;
+
+  // Fallback: read straight from the raw content. Some Logseq builds don't put
+  // every property into :block/properties (depends on how the value parses), so
+  // the markdown text is the real source of truth.
+  const contentMatch = String(block?.content || "")
+    .match(/(?:^|\n)[ \t]*async-timer::[ \t]*([^\n]+)/i);
+  if (contentMatch) {
+    const fromContent = parseCombinedTimerValue(contentMatch[1]);
+    if (fromContent) return fromContent;
+  }
 
   // Backward compatibility: legacy two-property format.
   const expiresAtRaw = getBlockPropertyValue(block, TIMER_PROP_EXPIRES_AT);
@@ -381,32 +391,40 @@ function clearTimerFromBlock(blockUuid, { toDone = false } = {}) {
   });
 }
 
-async function runTimerQuery(useFilter) {
-  const query = useFilter
-    ? `[:find (pull ?b [*])
-        :where
-        [?b :block/properties ?props]
-        (or [(contains? ?props :async-timer)]
-            [(contains? ?props :async-timer-expires-at)])]`
-    : `[:find (pull ?b [*])
-        :where
-        [?b :block/properties ?props]]`;
+// Returns an array of matching blocks, or null if the query itself failed
+// (unsupported syntax on this Logseq build) so the caller can try another way.
+async function runDatascript(query) {
   try {
     const result = await logseq.DB.datascriptQuery(query);
     return normalizeQueryBlocks(result).filter((block) => getTimerMetaFromBlock(block));
   } catch (e) {
-    console.warn("runTimerQuery:", e);
-    return [];
+    console.warn("runDatascript failed:", e);
+    return null;
   }
 }
 
-// Only pull blocks that actually carry the timer property — never the whole
-// graph. The unfiltered query is a one-off fallback in case this Logseq build
-// stores the property key differently; it self-heals without scanning content.
+// Detect timer blocks by their CONTENT (the source of truth) rather than the
+// property index — the index can silently drop properties depending on how the
+// value parses, which made timers vanish from the panel. Pushing the substring
+// filter into datascript keeps this cheap (it never pulls the whole graph).
 async function queryTimerBlocks() {
-  const filtered = await runTimerQuery(true);
-  if (filtered.length > 0) return filtered;
-  return await runTimerQuery(false);
+  const byContent = await runDatascript(`
+    [:find (pull ?b [*])
+     :where
+     [?b :block/content ?c]
+     [(clojure.string/includes? ?c "async-timer")]]`);
+  if (byContent !== null) return byContent;
+
+  // clojure.string/includes? unsupported here — fall back to the property index.
+  const byProp = await runDatascript(`
+    [:find (pull ?b [*])
+     :where
+     [?b :block/properties ?props]
+     [(contains? ?props :async-timer)]]`);
+  if (byProp !== null) return byProp;
+
+  // Last resort (both predicates unsupported): scan all content blocks.
+  return (await runDatascript(`[:find (pull ?b [*]) :where [?b :block/content ?c]]`)) || [];
 }
 
 async function loadTimerData() {
