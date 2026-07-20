@@ -50,6 +50,8 @@ const I18N = {
     overdueFor: (label) => `Overdue ${label}`,
     clearAllExpired: "🧹 Clear all expired",
     clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
+    inlineChangeTime: "Change time",
+    inlineComplete: "Complete",
   },
   zh: {
     noContent: "(无内容)",
@@ -89,6 +91,8 @@ const I18N = {
     overdueFor: (label) => `已超时 ${label}`,
     clearAllExpired: "🧹 清除所有过期",
     clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
+    inlineChangeTime: "修改时间",
+    inlineComplete: "完成",
   },
 };
 
@@ -112,6 +116,8 @@ const LEGACY_DATA_PAGE = "logseq-async-task-timer-data";
 const TIMER_PROP = "async-timer";
 const TIMER_PROP_EXPIRES_AT = "async-timer-expires-at";
 const TIMER_PROP_TOTAL_SECONDS = "async-timer-total-seconds";
+const INLINE_TIMER_RENDERER_TYPE = ":async-task-timer-controls";
+const INLINE_TIMER_RENDERER = `{{renderer ${INLINE_TIMER_RENDERER_TYPE}}}`;
 let _persistTimerPromise = Promise.resolve();
 let _syncFromGraphTimer = null;
 let _isRestoringTimers = false;
@@ -243,7 +249,7 @@ function hasClockMarker(blockOrContent) {
     ? blockOrContent
     : blockOrContent?.content;
   const firstLine = String(content || "").split("\n")[0] || "";
-  return /\s*⏰\s*$/.test(firstLine);
+  return /\s*⏰\s*$/.test(removeInlineTimerRendererFromContent(firstLine));
 }
 
 function addClockMarkerToContent(content) {
@@ -253,6 +259,20 @@ function addClockMarkerToContent(content) {
 
 function removeClockMarkerFromContent(content) {
   return mutateFirstLine(content, (line) => line.replace(/\s*⏰\s*$/, "").trimEnd());
+}
+
+function removeInlineTimerRendererFromContent(content) {
+  return mutateFirstLine(content, (line) => line
+    .replace(/\s*\{\{renderer\s+:async-task-timer-controls\s*\}\}/gi, "")
+    .trimEnd());
+}
+
+function addInlineTimerRendererToContent(content) {
+  const withoutRenderer = removeInlineTimerRendererFromContent(content);
+  return mutateFirstLine(
+    withoutRenderer,
+    (line) => `${line.trimEnd()} ${INLINE_TIMER_RENDERER}`,
+  );
 }
 
 function flattenBlocks(blocks) {
@@ -357,7 +377,8 @@ function stripTimerPropLines(content) {
 function buildTimerContent(content, expiresAt, totalSeconds) {
   const lines = stripTimerPropLines(content);
   if (lines.length === 0) lines.push("");
-  lines[0] = addClockMarkerToContent(lines[0]);
+  lines[0] = removeInlineTimerRendererFromContent(lines[0]);
+  lines[0] = addInlineTimerRendererToContent(addClockMarkerToContent(lines[0]));
   lines.push(`${TIMER_PROP}:: ${expiresAt}~${totalSeconds}`);
   return lines.join("\n");
 }
@@ -372,18 +393,20 @@ function persistTimerToBlock(timer) {
   });
 }
 
-// Reliably remove every timer artifact (both property lines + the ⏰ marker),
-// optionally flipping the task to DONE. This is what makes "handled on one
-// device → gone on every device" actually hold.
+// Reliably remove every timer artifact (both property lines + the ⏰ marker).
+// When completing, only TODO/DOING tasks become DONE; ordinary blocks keep
+// their original text. This is what makes "handled on one device → gone on
+// every device" actually hold.
 function clearTimerFromBlock(blockUuid, { toDone = false } = {}) {
   return queueTimerPersistence(async () => {
     const block = await logseq.Editor.getBlock(blockUuid);
     if (!block) return;
     const lines = stripTimerPropLines(block.content);
     if (lines.length === 0) lines.push("");
+    lines[0] = removeInlineTimerRendererFromContent(lines[0]);
     lines[0] = removeClockMarkerFromContent(lines[0]);
     if (toDone) {
-      lines[0] = lines[0].replace(/^(\s*)(TODO|DOING|LATER|NOW|WAITING)\s+/i, "$1DONE ");
+      lines[0] = lines[0].replace(/^(\s*)(TODO|DOING)\s+/i, "$1DONE ");
     }
     const content = lines.join("\n").replace(/\s+$/, "");
     markWritten(blockUuid);
@@ -564,6 +587,17 @@ async function migrateLegacyTimers() {
   }
 }
 
+async function ensureInlineTimerRenderers() {
+  for (const timer of timers.values()) {
+    const block = await logseq.Editor.getBlock(timer.blockUuid);
+    if (!block) continue;
+    const content = buildTimerContent(block.content, timer.expiresAt, timer.totalSeconds);
+    if (content === block.content) continue;
+    markWritten(timer.blockUuid);
+    await logseq.Editor.updateBlock(timer.blockUuid, content);
+  }
+}
+
 function scheduleRestoreTimers(opts = {}) {
   clearTimeout(_syncFromGraphTimer);
   _syncFromGraphTimer = setTimeout(() => {
@@ -588,6 +622,7 @@ function truncate(str, len = 40) {
   if (!str) return t("noContent");
   return str
     .replace(/(?:^|\n)\s*async-timer(?:-expires-at|-total-seconds)?::[^\n]*/gi, "")
+    .replace(/\s*\{\{renderer\s+:async-task-timer-controls\s*\}\}/gi, "")
     .replace(/^(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
     .replace(/⏰\s*$/, "").trim().slice(0, len) || t("noContent");
 }
@@ -1106,6 +1141,27 @@ function openPickerDialog(uuid, content) {
   logseq.showMainUI({ autoFocus: true });
 }
 
+// ─── Inline block controls ───
+
+function inlineTimerUIKey(blockUuid) {
+  return `async-task-timer-inline-${blockUuid}`;
+}
+
+function renderInlineTimerUI(blockUuid) {
+  const uuid = escapeHtml(String(blockUuid));
+  return `
+    <span class="async-timer-inline-controls">
+      <button class="async-timer-inline-btn"
+              data-uuid="${uuid}"
+              data-on-click="changeInlineTimer"
+              title="${t("inlineChangeTime")}">⏱ ${t("inlineChangeTime")}</button>
+      <button class="async-timer-inline-btn async-timer-inline-done"
+              data-uuid="${uuid}"
+              data-on-click="completeInlineTimer"
+              title="${t("inlineComplete")}">✅ ${t("inlineComplete")}</button>
+    </span>`;
+}
+
 // ─── Language detection ───
 
 async function detectLanguage() {
@@ -1169,6 +1225,38 @@ async function main() {
     .block-properties a[data-ref="async-timer-total-seconds"] {
       display: none !important;
     }
+    .async-timer-inline-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+      opacity: .72;
+      transition: opacity .15s ease;
+    }
+    .block-content:hover .async-timer-inline-controls,
+    .async-timer-inline-controls:focus-within {
+      opacity: 1;
+    }
+    .async-timer-inline-btn {
+      border: 1px solid var(--ls-border-color);
+      border-radius: 6px;
+      padding: 1px 6px;
+      background: var(--ls-secondary-background-color);
+      color: var(--ls-primary-text-color);
+      font-size: 11px;
+      line-height: 1.7;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .async-timer-inline-btn:hover {
+      border-color: var(--ls-link-text-color);
+      color: var(--ls-link-text-color);
+    }
+    .async-timer-inline-done:hover {
+      border-color: #4caf50;
+      color: #2e7d32;
+    }
   `);
 
   setupEvents();
@@ -1203,6 +1291,20 @@ async function main() {
   });
 
   logseq.provideModel({
+    async changeInlineTimer({ dataset }) {
+      const uuid = dataset?.uuid;
+      if (!uuid) return;
+      const block = await logseq.Editor.getBlock(uuid);
+      if (block && getTimerByBlockUuid(uuid)) {
+        openPickerDialog(uuid, block.content);
+      }
+    },
+    async completeInlineTimer({ dataset }) {
+      const uuid = dataset?.uuid;
+      if (!uuid) return;
+      const timer = getTimerByBlockUuid(uuid);
+      if (timer) await completeTimer(timer.id);
+    },
     toggleTimerPanel() {
       if (timers.size === 0) {
         logseq.UI.showMsg(t("panelEmpty"), "info", { timeout: 2000 });
@@ -1211,6 +1313,19 @@ async function main() {
       renderTimerPanel();
       logseq.showMainUI({ autoFocus: true });
     },
+  });
+
+  logseq.App.onMacroRendererSlotted(({ slot, payload }) => {
+    const [type] = payload?.arguments || [];
+    if (String(type || "").trim().toLowerCase() !== INLINE_TIMER_RENDERER_TYPE) return;
+    const blockUuid = payload?.uuid;
+    if (!blockUuid) return;
+    logseq.provideUI({
+      key: inlineTimerUIKey(blockUuid),
+      slot,
+      reset: true,
+      template: renderInlineTimerUI(blockUuid),
+    });
   });
 
   logseq.App.registerUIItem("toolbar", {
@@ -1229,6 +1344,7 @@ async function main() {
 
   await restoreTimers();
   await migrateLegacyTimers();
+  await ensureInlineTimerRenderers();
 }
 
 logseq.ready(main).catch(console.error);
