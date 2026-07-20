@@ -1,6 +1,6 @@
 import "@logseq/libs";
 
-const PRESET_MINUTES = [3, 5, 10, 15, 30, 1440, 4320];
+const PRESET_MINUTES = [3, 5, 10, 15, 30, 60, 240, 720, 1440, 4320];
 const STORAGE_KEY = "logseq-async-task-timer-data";
 
 let timers = new Map();
@@ -102,7 +102,7 @@ function t(key, ...args) {
 }
 
 function formatMinutes(m) {
-  if (m >= 1440 && m % 1440 === 0) return t("day", m / 1440);
+  if (m >= 720 && m % 720 === 0) return t("day", m / 1440);
   if (m >= 60 && m % 60 === 0) return t("hour", m / 60);
   return t("min", m);
 }
