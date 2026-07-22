@@ -55,8 +55,13 @@ const I18N = {
     clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
     inlineChangeTime: "Change time",
     inlineComplete: "Complete",
-    botExpiredMsg: (label, overdue) =>
-      `⏰ Async Task Timer Expired\n\n"${label}"\n${overdue}\n\nCountdown finished, please check progress!`,
+    botExpiredMd: ({ title, duration, expireAt, status }) =>
+      `## ⏰ Async Task Reminder\n` +
+      `> **Task**: ${title}\n` +
+      `> **Duration**: ${duration}\n` +
+      `> **Due**: ${expireAt}\n` +
+      `> **Status**: <font color="warning">${status}</font>\n\n` +
+      `Countdown finished — please check the progress.`,
   },
   zh: {
     noContent: "(无内容)",
@@ -98,8 +103,13 @@ const I18N = {
     clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
     inlineChangeTime: "修改时间",
     inlineComplete: "完成",
-    botExpiredMsg: (label, overdue) =>
-      `⏰ 异步任务到期\n\n「${label}」\n${overdue}\n\n倒计时已结束，请检查任务进度！`,
+    botExpiredMd: ({ title, duration, expireAt, status }) =>
+      `## ⏰ 异步任务到期提醒\n` +
+      `> **任务**：${title}\n` +
+      `> **时长**：${duration}\n` +
+      `> **到期时间**：${expireAt}\n` +
+      `> **状态**：<font color="warning">${status}</font>\n\n` +
+      `倒计时已结束，请检查任务进度！`,
   },
 };
 
@@ -649,6 +659,25 @@ function truncate(str, len = 40) {
     .replace(/⏰\s*$/, "").trim().slice(0, len) || t("noContent");
 }
 
+// A clean, single-line task title for external notifications: first line only,
+// stripped of the ⏰ marker, inline renderer, task keyword and priority tag.
+function botTaskTitle(content, len = 80) {
+  const firstLine = String(content || "").split("\n")[0] || "";
+  const cleaned = firstLine
+    .replace(/\{\{renderer\s+:async-task-timer-controls\s*\}\}/gi, "")
+    .replace(/^\s*(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
+    .replace(/\[#[A-C]\]\s*/g, "")
+    .replace(/⏰/g, "")
+    .trim();
+  return cleaned.slice(0, len) || t("noContent");
+}
+
+function formatClockTime(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -727,14 +756,14 @@ function clearBotNotifiedForBlock(blockUuid) {
   if (changed) saveBotNotified(map);
 }
 
-async function sendWecomBot(text) {
+async function sendWecomBot(payload) {
   const url = (logseq.settings?.wecomWebhook || "").trim();
   if (!url) return false;
   try {
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+      body: JSON.stringify(payload),
       // The WeCom webhook doesn't send CORS headers; we only need the request to
       // go out (fire-and-forget), so no-cors avoids the response being blocked.
       mode: "no-cors",
@@ -751,9 +780,17 @@ async function sendWecomBot(text) {
 async function notifyBotExpired(timer) {
   if (!(logseq.settings?.wecomWebhook || "").trim()) return;
   if (wasBotNotified(timer)) return;
-  const label = truncate(timer.blockContent, 60);
-  const overdue = formatOverdue(timer);
-  const sent = await sendWecomBot(t("botExpiredMsg", label, overdue));
+
+  const title = botTaskTitle(timer.blockContent);
+  const duration = formatDuration(timer.totalSeconds);
+  const expireAt = formatClockTime(timer.expiresAt);
+  // Fresh expiry reads "just expired"; restart-resend shows how overdue it is.
+  const status = getOverdueMs(timer) < 60000 ? t("justExpired") : formatOverdue(timer);
+
+  const sent = await sendWecomBot({
+    msgtype: "markdown",
+    markdown: { content: t("botExpiredMd", { title, duration, expireAt, status }) },
+  });
   if (sent) markBotNotified(timer);
 }
 
