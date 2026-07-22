@@ -878,11 +878,14 @@ function renderExpiredList(highlightTimerId = null) {
   const items = expired.map(timer => {
     const isCurrent = timer.id === effectiveHighlightTimerId;
     const taskText = escapeHtml(truncate(timer.blockContent, 60));
+    const blockUuid = escapeHtml(String(timer.blockUuid));
     const overdueText = escapeHtml(formatOverdue(timer, now));
     return `
       <div class="expired-item${isCurrent ? " expired-item-current" : ""}">
         ${isCurrent ? `<div class="expired-current-badge">${t("justExpired")}</div>` : ""}
-        <div class="task">${taskText}</div>
+        <div class="task expired-task-link"
+             data-uuid="${blockUuid}"
+             title="${t("panelClickHint")}">${taskText}</div>
         <div class="expired-overdue">${overdueText}</div>
         <div class="expired-actions">
           <button class="action-btn done-btn" data-action="done" data-id="${timer.id}">${t("markDone")}</button>
@@ -1090,7 +1093,7 @@ function setupEvents() {
       return;
     }
 
-    const taskLink = e.target.closest(".panel-task-link");
+    const taskLink = e.target.closest(".panel-task-link, .expired-task-link");
     if (taskLink) {
       const uuid = taskLink.dataset.uuid;
       if (uuid) {
