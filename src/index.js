@@ -2,6 +2,9 @@ import "@logseq/libs";
 
 const PRESET_MINUTES = [3, 5, 10, 15, 30, 60, 240, 720, 1440, 4320];
 const STORAGE_KEY = "logseq-async-task-timer-data";
+// Tracks which (blockUuid @ expiresAt) reminders have already been pushed to the
+// WeCom bot, so a still-expired timer isn't re-sent on every Logseq restart.
+const BOT_NOTIFIED_KEY = "logseq-async-task-timer-bot-notified";
 
 let timers = new Map();
 let timerIdCounter = 0;
@@ -52,6 +55,8 @@ const I18N = {
     clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
     inlineChangeTime: "Change time",
     inlineComplete: "Complete",
+    botExpiredMsg: (label, overdue) =>
+      `⏰ Async Task Timer Expired\n\n"${label}"\n${overdue}\n\nCountdown finished, please check progress!`,
   },
   zh: {
     noContent: "(无内容)",
@@ -93,6 +98,8 @@ const I18N = {
     clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
     inlineChangeTime: "修改时间",
     inlineComplete: "完成",
+    botExpiredMsg: (label, overdue) =>
+      `⏰ 异步任务到期\n\n「${label}」\n${overdue}\n\n倒计时已结束，请检查任务进度！`,
   },
 };
 
@@ -561,6 +568,9 @@ async function restoreTimers({ notifyExpired = true } = {}) {
     // gentle toast; the toolbar ⏰ panel lists them for one-tap handling.
     if (expiredOnRestore.length > 0) {
       logseq.UI.showMsg(t("restoreExpired", expiredOnRestore.length), "warning", { timeout: 8000 });
+      for (const timer of expiredOnRestore) {
+        await notifyBotExpired(timer);
+      }
     }
   } catch (e) {
     console.warn("restoreTimers:", e);
@@ -673,6 +683,80 @@ function playAlertSound() {
   } catch (_) {}
 }
 
+// ─── WeCom (企业微信) bot ───
+
+function botNotifyKey(timer) {
+  return `${timer.blockUuid}~${timer.expiresAt}`;
+}
+
+function loadBotNotified() {
+  try {
+    const raw = localStorage.getItem(BOT_NOTIFIED_KEY);
+    const data = raw ? JSON.parse(raw) : null;
+    return data && typeof data === "object" ? data : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveBotNotified(map) {
+  try { localStorage.setItem(BOT_NOTIFIED_KEY, JSON.stringify(map)); } catch (_) {}
+}
+
+function wasBotNotified(timer) {
+  return botNotifyKey(timer) in loadBotNotified();
+}
+
+function markBotNotified(timer) {
+  const map = loadBotNotified();
+  map[botNotifyKey(timer)] = Date.now();
+  saveBotNotified(map);
+}
+
+// Drop every remembered notification for a block (used on complete/dismiss so a
+// future timer on the same block can notify again).
+function clearBotNotifiedForBlock(blockUuid) {
+  const map = loadBotNotified();
+  let changed = false;
+  for (const key of Object.keys(map)) {
+    if (key.startsWith(`${blockUuid}~`)) {
+      delete map[key];
+      changed = true;
+    }
+  }
+  if (changed) saveBotNotified(map);
+}
+
+async function sendWecomBot(text) {
+  const url = (logseq.settings?.wecomWebhook || "").trim();
+  if (!url) return false;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+      // The WeCom webhook doesn't send CORS headers; we only need the request to
+      // go out (fire-and-forget), so no-cors avoids the response being blocked.
+      mode: "no-cors",
+    });
+    return true;
+  } catch (e) {
+    console.warn("sendWecomBot:", e);
+    return false;
+  }
+}
+
+// Push an expired timer to the WeCom bot, guarding against duplicates so the same
+// still-expired task isn't re-sent on every restart.
+async function notifyBotExpired(timer) {
+  if (!(logseq.settings?.wecomWebhook || "").trim()) return;
+  if (wasBotNotified(timer)) return;
+  const label = truncate(timer.blockContent, 60);
+  const overdue = formatOverdue(timer);
+  const sent = await sendWecomBot(t("botExpiredMsg", label, overdue));
+  if (sent) markBotNotified(timer);
+}
+
 // ─── Block marker ───
 
 async function addClockMarker(uuid) {
@@ -777,6 +861,8 @@ async function onTimerExpired(timer) {
     }
   } catch (_) {}
 
+  notifyBotExpired(timer);
+
   renderExpiredList(timer.id);
   logseq.showMainUI({ autoFocus: true });
 }
@@ -795,6 +881,7 @@ async function completeTimer(id) {
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
   timers.delete(id);
+  clearBotNotifiedForBlock(timer.blockUuid);
   await clearTimerFromBlock(timer.blockUuid, { toDone: true });
   saveTimers();
   logseq.UI.showMsg(t("taskDone"), "success", { timeout: 2000 });
@@ -804,6 +891,7 @@ async function snoozeTimer(id, minutes) {
   const timer = timers.get(id);
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
+  clearBotNotifiedForBlock(timer.blockUuid);
   timer.remaining = minutes * 60;
   timer.totalSeconds = minutes * 60;
   timer.expiresAt = Date.now() + minutes * 60 * 1000;
@@ -819,6 +907,7 @@ async function dismissTimer(id) {
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
   timers.delete(id);
+  clearBotNotifiedForBlock(timer.blockUuid);
   await clearTimerFromBlock(timer.blockUuid);
   saveTimers();
 }
@@ -828,6 +917,7 @@ async function dismissAllExpired() {
   for (const ti of expired) {
     if (ti.intervalId) clearInterval(ti.intervalId);
     timers.delete(ti.id);
+    clearBotNotifiedForBlock(ti.blockUuid);
     await clearTimerFromBlock(ti.blockUuid);
   }
   saveTimers();
@@ -1205,6 +1295,14 @@ async function main() {
       default: "auto",
       enumChoices: ["auto", "en", "zh"],
       enumPicker: "select",
+    },
+    {
+      key: "wecomWebhook",
+      type: "string",
+      title: "WeCom Bot Webhook / 企业微信机器人 Webhook",
+      description:
+        "Optional. Paste a WeCom group bot webhook URL to also push expired-task reminders there (also re-sent after restart). Leave empty to disable. 可选：填入企业微信群机器人 Webhook，到期提醒会同步推送到群里（重启后也会补发），留空则关闭。",
+      default: "",
     },
   ]);
 
