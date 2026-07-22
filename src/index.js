@@ -55,13 +55,13 @@ const I18N = {
     clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
     inlineChangeTime: "Change time",
     inlineComplete: "Complete",
-    botExpiredMd: ({ title, duration, expireAt, status }) =>
-      `## ⏰ Async Task Reminder\n` +
-      `> **Task**: ${title}\n` +
-      `> **Duration**: ${duration}\n` +
-      `> **Due**: ${expireAt}\n` +
-      `> **Status**: <font color="warning">${status}</font>\n\n` +
-      `Countdown finished — please check the progress.`,
+    botHeader: "## ⏰ Async Task Reminder",
+    botFooter: "Countdown finished — please check the progress.",
+    botLineTask: (v) => `> **Task**: ${v}`,
+    botLinePage: (v) => `> **Page**: ${v}`,
+    botLineDuration: (v) => `> **Duration**: ${v}`,
+    botLineDueTime: (v) => `> **Due**: ${v}`,
+    botLineStatus: (v) => `> **Status**: <font color="warning">${v}</font>`,
   },
   zh: {
     noContent: "(无内容)",
@@ -103,13 +103,13 @@ const I18N = {
     clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
     inlineChangeTime: "修改时间",
     inlineComplete: "完成",
-    botExpiredMd: ({ title, duration, expireAt, status }) =>
-      `## ⏰ 异步任务到期提醒\n` +
-      `> **任务**：${title}\n` +
-      `> **时长**：${duration}\n` +
-      `> **到期时间**：${expireAt}\n` +
-      `> **状态**：<font color="warning">${status}</font>\n\n` +
-      `倒计时已结束，请检查任务进度！`,
+    botHeader: "## ⏰ 异步任务到期提醒",
+    botFooter: "倒计时已结束，请检查任务进度！",
+    botLineTask: (v) => `> **任务**：${v}`,
+    botLinePage: (v) => `> **页面**：${v}`,
+    botLineDuration: (v) => `> **时长**：${v}`,
+    botLineDueTime: (v) => `> **到期时间**：${v}`,
+    botLineStatus: (v) => `> **状态**：<font color="warning">${v}</font>`,
   },
 };
 
@@ -714,6 +714,18 @@ function playAlertSound() {
 
 // ─── WeCom (企业微信) bot ───
 
+async function getBlockPageName(blockUuid) {
+  try {
+    const block = await logseq.Editor.getBlock(blockUuid);
+    const pageId = block?.page?.id;
+    if (!pageId) return null;
+    const page = await logseq.Editor.getPage(pageId);
+    return page?.originalName || page?.name || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function botNotifyKey(timer) {
   return `${timer.blockUuid}~${timer.expiresAt}`;
 }
@@ -781,15 +793,25 @@ async function notifyBotExpired(timer) {
   if (!(logseq.settings?.wecomWebhook || "").trim()) return;
   if (wasBotNotified(timer)) return;
 
+  const s = logseq.settings || {};
   const title = botTaskTitle(timer.blockContent);
-  const duration = formatDuration(timer.totalSeconds);
-  const expireAt = formatClockTime(timer.expiresAt);
   // Fresh expiry reads "just expired"; restart-resend shows how overdue it is.
   const status = getOverdueMs(timer) < 60000 ? t("justExpired") : formatOverdue(timer);
 
+  // `!== false` keeps a field on when its setting hasn't been written yet, so the
+  // defaults (all on) hold for users who upgraded without touching settings.
+  const lines = [t("botHeader"), t("botLineTask", title)];
+  if (s.botShowPage !== false) {
+    const pageName = await getBlockPageName(timer.blockUuid);
+    if (pageName) lines.push(t("botLinePage", pageName));
+  }
+  if (s.botShowDuration !== false) lines.push(t("botLineDuration", formatDuration(timer.totalSeconds)));
+  if (s.botShowDueTime !== false) lines.push(t("botLineDueTime", formatClockTime(timer.expiresAt)));
+  lines.push(t("botLineStatus", status), "", t("botFooter"));
+
   const sent = await sendWecomBot({
     msgtype: "markdown",
-    markdown: { content: t("botExpiredMd", { title, duration, expireAt, status }) },
+    markdown: { content: lines.join("\n") },
   });
   if (sent) markBotNotified(timer);
 }
@@ -1340,6 +1362,27 @@ async function main() {
       description:
         "Optional. Paste a WeCom group bot webhook URL to also push expired-task reminders there (also re-sent after restart). Leave empty to disable. 可选：填入企业微信群机器人 Webhook，到期提醒会同步推送到群里（重启后也会补发），留空则关闭。",
       default: "",
+    },
+    {
+      key: "botShowPage",
+      type: "boolean",
+      title: "Push includes: page / 推送包含：所在页面",
+      description: "Include the page the timer block lives on. 推送中显示计时块所在的页面。",
+      default: true,
+    },
+    {
+      key: "botShowDuration",
+      type: "boolean",
+      title: "Push includes: duration / 推送包含：设定时长",
+      description: "Include the configured countdown duration. 推送中显示设定的倒计时时长。",
+      default: true,
+    },
+    {
+      key: "botShowDueTime",
+      type: "boolean",
+      title: "Push includes: due time / 推送包含：到期时间",
+      description: "Include the timestamp when the timer expired. 推送中显示任务到期时间。",
+      default: true,
     },
   ]);
 
