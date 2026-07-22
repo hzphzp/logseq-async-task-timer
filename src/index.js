@@ -244,6 +244,16 @@ function mutateFirstLine(content, transform) {
   return lines.join("\n");
 }
 
+function markBlockAsDoing(content) {
+  return mutateFirstLine(content, (line) => {
+    const marker = /^(\s*)(TODO|DOING|DONE|LATER|NOW|WAITING)(?:\s+|$)/i;
+    if (marker.test(line)) return line.replace(marker, "$1DOING ");
+    const leadingWhitespace = line.match(/^\s*/)?.[0] || "";
+    const text = line.slice(leadingWhitespace.length);
+    return `${leadingWhitespace}DOING${text ? ` ${text}` : ""}`;
+  });
+}
+
 function hasClockMarker(blockOrContent) {
   const content = typeof blockOrContent === "string"
     ? blockOrContent
@@ -383,11 +393,13 @@ function buildTimerContent(content, expiresAt, totalSeconds) {
   return lines.join("\n");
 }
 
-function persistTimerToBlock(timer) {
+function persistTimerToBlock(timer, { markDoing = false } = {}) {
   return queueTimerPersistence(async () => {
     const block = await logseq.Editor.getBlock(timer.blockUuid);
     if (!block) return;
-    const content = buildTimerContent(block.content, timer.expiresAt, timer.totalSeconds);
+    const sourceContent = markDoing ? markBlockAsDoing(block.content) : block.content;
+    const content = buildTimerContent(sourceContent, timer.expiresAt, timer.totalSeconds);
+    timer.blockContent = content;
     markWritten(timer.blockUuid);
     await logseq.Editor.updateBlock(timer.blockUuid, content);
   });
@@ -701,7 +713,7 @@ async function createTimer(blockUuid, blockContent, minutes) {
   timers = new Map([...timers].filter(([, ti]) => ti.blockUuid !== blockUuid));
   startTimerInterval(timer);
   timers.set(timer.id, timer);
-  await persistTimerToBlock(timer);
+  await persistTimerToBlock(timer, { markDoing: true });
   saveTimers();
   const label = minutes < 1 ? t("seconds", totalSeconds) : formatMinutes(minutes);
   logseq.UI.showMsg(t("timerSet", label), "success", { timeout: 2000 });
