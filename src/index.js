@@ -2,6 +2,17 @@ import "@logseq/libs";
 
 const PRESET_MINUTES = [3, 5, 10, 15, 30, 60, 240, 720, 1440, 4320];
 const STORAGE_KEY = "logseq-async-task-timer-data";
+// Tracks which (blockUuid @ expiresAt) reminders have already been pushed to the
+// WeCom bot, so a still-expired timer isn't re-sent on every Logseq restart.
+const BOT_NOTIFIED_KEY = "logseq-async-task-timer-bot-notified";
+// Per-device id (localStorage, never synced) used by the "single push device"
+// option so multi-device graphs don't fire the same reminder from every device.
+const DEVICE_ID_KEY = "logseq-async-task-timer-device-id";
+// If a restart surfaces more than this many expired timers at once, they're
+// merged into a single summary push instead of one message each (avoids the
+// WeCom 20-msgs/min flood).
+const BOT_BATCH_SUMMARY_THRESHOLD = 1;
+const BOT_FETCH_TIMEOUT_MS = 8000;
 
 let timers = new Map();
 let timerIdCounter = 0;
@@ -52,6 +63,15 @@ const I18N = {
     clearedExpired: (n) => `🧹 Cleared ${n} expired timer(s)`,
     inlineChangeTime: "Change time",
     inlineComplete: "Complete",
+    botHeader: "## ⏰ Async Task Reminder",
+    botFooter: "Countdown finished — please check the progress.",
+    botLineTask: (v) => `> **Task**: ${v}`,
+    botLinePage: (v) => `> **Page**: ${v}`,
+    botLineDuration: (v) => `> **Duration**: ${v}`,
+    botLineDueTime: (v) => `> **Due**: ${v}`,
+    botLineStatus: (v) => `> **Status**: <font color="warning">${v}</font>`,
+    botHeaderMulti: (n) => `## ⏰ ${n} async tasks expired`,
+    botLineItem: (idx, title, status) => `> ${idx}. **${title}** · <font color="warning">${status}</font>`,
   },
   zh: {
     noContent: "(无内容)",
@@ -93,6 +113,15 @@ const I18N = {
     clearedExpired: (n) => `🧹 已清除 ${n} 个过期计时`,
     inlineChangeTime: "修改时间",
     inlineComplete: "完成",
+    botHeader: "## ⏰ 异步任务到期提醒",
+    botFooter: "倒计时已结束，请检查任务进度！",
+    botLineTask: (v) => `> **任务**：${v}`,
+    botLinePage: (v) => `> **页面**：${v}`,
+    botLineDuration: (v) => `> **时长**：${v}`,
+    botLineDueTime: (v) => `> **到期时间**：${v}`,
+    botLineStatus: (v) => `> **状态**：<font color="warning">${v}</font>`,
+    botHeaderMulti: (n) => `## ⏰ ${n} 个异步任务到期`,
+    botLineItem: (idx, title, status) => `> ${idx}. **${title}** · <font color="warning">${status}</font>`,
   },
 };
 
@@ -561,6 +590,9 @@ async function restoreTimers({ notifyExpired = true } = {}) {
     // gentle toast; the toolbar ⏰ panel lists them for one-tap handling.
     if (expiredOnRestore.length > 0) {
       logseq.UI.showMsg(t("restoreExpired", expiredOnRestore.length), "warning", { timeout: 8000 });
+      // Fire-and-forget: a slow/hanging webhook must not block plugin startup,
+      // which awaits restoreTimers() before finishing init.
+      notifyBotExpiredBatch(expiredOnRestore);
     }
   } catch (e) {
     console.warn("restoreTimers:", e);
@@ -639,6 +671,25 @@ function truncate(str, len = 40) {
     .replace(/⏰\s*$/, "").trim().slice(0, len) || t("noContent");
 }
 
+// A clean, single-line task title for external notifications: first line only,
+// stripped of the ⏰ marker, inline renderer, task keyword and priority tag.
+function botTaskTitle(content, len = 80) {
+  const firstLine = String(content || "").split("\n")[0] || "";
+  const cleaned = firstLine
+    .replace(/\{\{renderer\s+:async-task-timer-controls\s*\}\}/gi, "")
+    .replace(/^\s*(TODO|DOING|DONE|LATER|NOW|WAITING)\s+/i, "")
+    .replace(/\[#[A-C]\]\s*/g, "")
+    .replace(/⏰/g, "")
+    .trim();
+  return cleaned.slice(0, len) || t("noContent");
+}
+
+function formatClockTime(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -671,6 +722,175 @@ function playAlertSound() {
       o.stop(ctx.currentTime + d / 1000 + 0.12);
     });
   } catch (_) {}
+}
+
+// ─── WeCom (企业微信) bot ───
+
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_ID_KEY);
+    if (!id) {
+      id = `dev-${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
+      localStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch (_) {
+    return "dev-unknown";
+  }
+}
+
+// When "single push device" is on, only the designated host device may push.
+// An empty host id means the first device to reach this point claims the role
+// (written to the synced settings so other devices then stand down).
+function shouldThisDevicePush() {
+  if (!logseq.settings?.botThisDeviceOnly) return true;
+  const myId = getDeviceId();
+  const hostId = (logseq.settings?.botHostDeviceId || "").trim();
+  if (!hostId) {
+    try { logseq.updateSettings({ botHostDeviceId: myId }); } catch (_) {}
+    return true;
+  }
+  return hostId === myId;
+}
+
+async function getBlockPageName(blockUuid) {
+  try {
+    const block = await logseq.Editor.getBlock(blockUuid);
+    const pageId = block?.page?.id;
+    if (!pageId) return null;
+    const page = await logseq.Editor.getPage(pageId);
+    return page?.originalName || page?.name || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function botNotifyKey(timer) {
+  return `${timer.blockUuid}~${timer.expiresAt}`;
+}
+
+function loadBotNotified() {
+  try {
+    const raw = localStorage.getItem(BOT_NOTIFIED_KEY);
+    const data = raw ? JSON.parse(raw) : null;
+    return data && typeof data === "object" ? data : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveBotNotified(map) {
+  try { localStorage.setItem(BOT_NOTIFIED_KEY, JSON.stringify(map)); } catch (_) {}
+}
+
+function wasBotNotified(timer) {
+  return botNotifyKey(timer) in loadBotNotified();
+}
+
+function markBotNotified(timer) {
+  const map = loadBotNotified();
+  map[botNotifyKey(timer)] = Date.now();
+  saveBotNotified(map);
+}
+
+// Drop every remembered notification for a block (used on complete/dismiss so a
+// future timer on the same block can notify again).
+function clearBotNotifiedForBlock(blockUuid) {
+  const map = loadBotNotified();
+  let changed = false;
+  for (const key of Object.keys(map)) {
+    if (key.startsWith(`${blockUuid}~`)) {
+      delete map[key];
+      changed = true;
+    }
+  }
+  if (changed) saveBotNotified(map);
+}
+
+async function sendWecomBot(payload) {
+  const url = (logseq.settings?.wecomWebhook || "").trim();
+  if (!url) return false;
+  const controller = new AbortController();
+  // Bound the request so a hanging/unreachable webhook can't stall the caller
+  // (notably plugin startup, which restores + notifies before finishing init).
+  const timeoutId = setTimeout(() => controller.abort(), BOT_FETCH_TIMEOUT_MS);
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      // The WeCom webhook doesn't send CORS headers; we only need the request to
+      // go out (fire-and-forget), so no-cors avoids the response being blocked.
+      mode: "no-cors",
+      signal: controller.signal,
+    });
+    return true;
+  } catch (e) {
+    console.warn("sendWecomBot:", e);
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Push an expired timer to the WeCom bot, guarding against duplicates so the same
+// still-expired task isn't re-sent on every restart.
+async function notifyBotExpired(timer) {
+  if (!(logseq.settings?.wecomWebhook || "").trim()) return;
+  if (!shouldThisDevicePush()) return;
+  if (wasBotNotified(timer)) return;
+
+  const s = logseq.settings || {};
+  const title = botTaskTitle(timer.blockContent);
+  // Fresh expiry reads "just expired"; restart-resend shows how overdue it is.
+  const status = getOverdueMs(timer) < 60000 ? t("justExpired") : formatOverdue(timer);
+
+  // `!== false` keeps a field on when its setting hasn't been written yet, so the
+  // defaults (all on) hold for users who upgraded without touching settings.
+  const lines = [t("botHeader"), t("botLineTask", title)];
+  if (s.botShowPage !== false) {
+    const pageName = await getBlockPageName(timer.blockUuid);
+    if (pageName) lines.push(t("botLinePage", pageName));
+  }
+  if (s.botShowDuration !== false) lines.push(t("botLineDuration", formatDuration(timer.totalSeconds)));
+  if (s.botShowDueTime !== false) lines.push(t("botLineDueTime", formatClockTime(timer.expiresAt)));
+  lines.push(t("botLineStatus", status), "", t("botFooter"));
+
+  const sent = await sendWecomBot({
+    msgtype: "markdown",
+    markdown: { content: lines.join("\n") },
+  });
+  if (sent) markBotNotified(timer);
+}
+
+// Push a group of already-expired timers surfaced on restart. A single new one
+// gets the full detailed card; several at once are merged into one summary push
+// so a backlog can't flood the group (WeCom caps at 20 msgs/min).
+async function notifyBotExpiredBatch(list) {
+  if (!(logseq.settings?.wecomWebhook || "").trim()) return;
+  if (!shouldThisDevicePush()) return;
+
+  const pending = (list || []).filter((ti) => !wasBotNotified(ti));
+  if (pending.length === 0) return;
+
+  if (pending.length <= BOT_BATCH_SUMMARY_THRESHOLD) {
+    for (const ti of pending) await notifyBotExpired(ti);
+    return;
+  }
+
+  const lines = [t("botHeaderMulti", pending.length)];
+  pending.forEach((ti, i) => {
+    const title = botTaskTitle(ti.blockContent);
+    const status = getOverdueMs(ti) < 60000 ? t("justExpired") : formatOverdue(ti);
+    lines.push(t("botLineItem", i + 1, title, status));
+  });
+  lines.push("", t("botFooter"));
+
+  const sent = await sendWecomBot({
+    msgtype: "markdown",
+    markdown: { content: lines.join("\n") },
+  });
+  if (sent) pending.forEach((ti) => markBotNotified(ti));
 }
 
 // ─── Block marker ───
@@ -777,6 +997,8 @@ async function onTimerExpired(timer) {
     }
   } catch (_) {}
 
+  notifyBotExpired(timer);
+
   renderExpiredList(timer.id);
   logseq.showMainUI({ autoFocus: true });
 }
@@ -795,6 +1017,7 @@ async function completeTimer(id) {
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
   timers.delete(id);
+  clearBotNotifiedForBlock(timer.blockUuid);
   await clearTimerFromBlock(timer.blockUuid, { toDone: true });
   saveTimers();
   logseq.UI.showMsg(t("taskDone"), "success", { timeout: 2000 });
@@ -804,6 +1027,7 @@ async function snoozeTimer(id, minutes) {
   const timer = timers.get(id);
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
+  clearBotNotifiedForBlock(timer.blockUuid);
   timer.remaining = minutes * 60;
   timer.totalSeconds = minutes * 60;
   timer.expiresAt = Date.now() + minutes * 60 * 1000;
@@ -819,6 +1043,7 @@ async function dismissTimer(id) {
   if (!timer) return;
   if (timer.intervalId) clearInterval(timer.intervalId);
   timers.delete(id);
+  clearBotNotifiedForBlock(timer.blockUuid);
   await clearTimerFromBlock(timer.blockUuid);
   saveTimers();
 }
@@ -828,6 +1053,7 @@ async function dismissAllExpired() {
   for (const ti of expired) {
     if (ti.intervalId) clearInterval(ti.intervalId);
     timers.delete(ti.id);
+    clearBotNotifiedForBlock(ti.blockUuid);
     await clearTimerFromBlock(ti.blockUuid);
   }
   saveTimers();
@@ -1205,6 +1431,51 @@ async function main() {
       default: "auto",
       enumChoices: ["auto", "en", "zh"],
       enumPicker: "select",
+    },
+    {
+      key: "wecomWebhook",
+      type: "string",
+      title: "WeCom Bot Webhook / 企业微信机器人 Webhook",
+      description:
+        "Optional. Paste a WeCom group bot webhook URL to also push expired-task reminders there (also re-sent after restart). Leave empty to disable. 可选：填入企业微信群机器人 Webhook，到期提醒会同步推送到群里（重启后也会补发），留空则关闭。",
+      default: "",
+    },
+    {
+      key: "botShowPage",
+      type: "boolean",
+      title: "Push includes: page / 推送包含：所在页面",
+      description: "Include the page the timer block lives on. 推送中显示计时块所在的页面。",
+      default: true,
+    },
+    {
+      key: "botShowDuration",
+      type: "boolean",
+      title: "Push includes: duration / 推送包含：设定时长",
+      description: "Include the configured countdown duration. 推送中显示设定的倒计时时长。",
+      default: true,
+    },
+    {
+      key: "botShowDueTime",
+      type: "boolean",
+      title: "Push includes: due time / 推送包含：到期时间",
+      description: "Include the timestamp when the timer expired. 推送中显示任务到期时间。",
+      default: true,
+    },
+    {
+      key: "botThisDeviceOnly",
+      type: "boolean",
+      title: "Push from a single device only / 仅允许一台设备推送",
+      description:
+        "For multi-device graphs sharing one webhook: only the designated host device pushes, avoiding duplicate messages. When the host id below is empty, the first device to run claims the role. 多设备同步同一图谱、共用一个 Webhook 时，只让指定的主机设备推送，避免重复。下方主机 ID 为空时，第一台运行的设备会自动认领。",
+      default: false,
+    },
+    {
+      key: "botHostDeviceId",
+      type: "string",
+      title: "Push host device ID / 推送主机设备 ID",
+      description:
+        "The device allowed to push when the option above is on. Leave empty to let the current device auto-claim; to switch host, clear this and enable the option on the target device. 开启上面的开关后，只有此 ID 的设备会推送。留空则由当前设备自动认领；要更换主机，清空此项并在目标设备上开启开关。",
+      default: "",
     },
   ]);
 
