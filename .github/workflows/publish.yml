@@ -1,15 +1,19 @@
-name: Build plugin
+name: Build and release plugin
 
 on:
   push:
     tags:
-      - "*"
+      - "v*"
 
 env:
   PLUGIN_NAME: logseq-async-task-timer
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -21,44 +25,41 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
-      - name: Build
-        id: build
+      - name: Check release version and notes
         run: |
-          npm install
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const tag = process.env.GITHUB_REF_NAME;
+          assert.equal(tag, `v${pkg.version}`, 'Tag must match package.json version');
+          const notes = readFileSync(`docs/releases/${tag}.md`, 'utf8');
+          assert.ok(notes.startsWith(`# ${tag} —`), 'Release notes must identify this version');
+          assert.ok(pkg.supportsDBOnly && pkg.logseq.supportsDBOnly, 'This release requires DB-only metadata');
+          JS
+      - name: Build
+        run: |
+          npm ci
+          npm test
           npm run build
-          mkdir ${{ env.PLUGIN_NAME }}
-          cp README.md package.json icon.png logo.svg LICENSE ${{ env.PLUGIN_NAME }}
-          mv dist ${{ env.PLUGIN_NAME }}
-          zip -r ${{ env.PLUGIN_NAME }}.zip ${{ env.PLUGIN_NAME }}
-          ls
-          echo "tag_name=$(git tag --sort version:refname | tail -n 1)" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: ncipollo/release-action@v1
-        id: create_release
+          mkdir "$PLUGIN_NAME"
+          cp README.md package.json icon.png logo.svg LICENSE "$PLUGIN_NAME/"
+          cp -R vendor dist "$PLUGIN_NAME/"
+          cp "docs/releases/${GITHUB_REF_NAME}.md" "$PLUGIN_NAME/RELEASE_NOTES.md"
+          mkdir -p "$PLUGIN_NAME/docs/releases"
+          cp "docs/releases/${GITHUB_REF_NAME}.md" "$PLUGIN_NAME/docs/releases/"
+          zip -r "${PLUGIN_NAME}-${GITHUB_REF_NAME}.zip" "$PLUGIN_NAME"
+      - name: Publish release with notes and assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          allowUpdates: true
-          draft: false
-          prerelease: false
-
-      - name: Upload zip file
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ env.PLUGIN_NAME }}.zip
-          asset_name: ${{ env.PLUGIN_NAME }}-${{ steps.build.outputs.tag_name }}.zip
-          asset_content_type: application/zip
-
-      - name: Upload package.json
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./package.json
-          asset_name: package.json
-          asset_content_type: application/json
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          title="$(sed -n '1s/^# //p' "$notes")"
+          archive="${PLUGIN_NAME}-${GITHUB_REF_NAME}.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" package.json --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file "$notes" --draft=false --latest
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" package.json \
+              --verify-tag --title "$title" --notes-file "$notes" --latest
+          fi

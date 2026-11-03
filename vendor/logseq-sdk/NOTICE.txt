@@ -1,0 +1,15 @@
+Logseq SDK 0.3.4, shipped with Logseq Desktop 2.0.2 (revision 533ac43).
+Unmodified js/lsplugin.user.js and its license notices from the official app.asar.
+Upstream: https://github.com/logseq/logseq/tree/533ac43/libs
+The bundled SDK is pinned because npm @logseq/libs still publishes 0.0.17,
+which predates the DB-only command and property APIs.
+SHA256 lsplugin.user.js: 455e5e74b44ecb1047ae89a6ff30cbfcfceac09d8a2ca36393ac7f159b4c5c3e
+
+Upstream repository license: GNU Affero General Public License v3.0;
+see LOGSEQ-LICENSE.md (copied from the pinned upstream revision).
+SDK source and build configuration: https://github.com/logseq/logseq/tree/533ac43/libs
+Upstream source archive: https://github.com/logseq/logseq/archive/533ac43.tar.gz
+The SDK has not been modified. Its original extracted license banner is kept in
+lsplugin.user.js.LICENSE.txt. DOMPurify's full upstream license is included as
+DOMPURIFY-LICENSE.txt. These upstream terms are separate from the MIT license
+on this repository's original plugin source.

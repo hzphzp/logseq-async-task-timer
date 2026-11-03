@@ -1,0 +1,38 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Async Task Timer · UI test fixture</title><link rel="stylesheet" href="/src/style.css"><div id="app"></div><script type="module">
+import { TimerView } from '/src/ui.js';
+import { transition, snapshot } from '/src/reminder.js';
+const now = Date.now();
+const entries = [
+  ['确认数据导出是否完成', -420000, '数据整理', '小林'],
+  ['检查长任务运行结果', 3600000, '模型实验', '小陈'],
+  ['跟进下周的评审材料', 3 * 86400000, '项目评审', ''],
+  ['等待同事确认时间', 3600000, '项目评审', '小周'],
+  ['已经整理完成的会议记录', -3600000, '资料归档', ''],
+];
+const records = new Map(entries.map(([title, delta, project, owner], i) => {
+  const id = `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`;
+  const state = i === 3 ? 'paused' : i === 4 ? 'completed' : 'active';
+  const record = { blockUuid: id, blockContent: title, project, owner, pageName: '示例页面', state,
+    expiresAt: state === 'active' ? now + delta : null, totalSeconds: 3600, pausedSeconds: state === 'paused' ? 3600 : null,
+    taskStatus: i === 4 ? 'logseq.property/status.done' : 'logseq.property/status.todo', lastChecked: now - 86400000 };
+  record.history = { version: 1, events: [{ id: 'initial-' + i, action: 'import', at: now - 86400000, before: null, after: snapshot(record) }] };
+  return [id, record];
+}));
+const view = new TimerView(document.getElementById('app'), { records: () => records, lang: 'zh',
+  receipt: r => r.expiresAt && r.expiresAt < now ? { status: 'failed', attempts: 3, error: 'HTTP 503（测试数据）' } : null,
+  run: async (action, uuid, options) => {
+    if (['test', 'retry', 'permission'].includes(action)) { view.setNotice('测试页面：没有发送真实消息或请求系统权限。'); return; }
+    if (action === 'navigate') { view.setNotice('测试页面：这里会跳转到原任务。'); return; }
+    if (action === 'close') return;
+    if (action === 'bulk') { view.setNotice(`测试页面：已选 ${options.ids.length} 条；批量保存由集成测试验证。`); return; }
+    const record = records.get(uuid), next = transition(record, action, options);
+    records.set(uuid, { ...record, ...next, history: { version: 1, events: [...record.history.events,
+      { id: crypto.randomUUID(), action, at: Date.now(), before: snapshot(record), after: snapshot(next) }] } });
+    view.update();
+  },
+});
+view.setBanner('界面测试数据 · 不会修改 Logseq 笔记或发送企业微信。'); view.showPanel();
+setInterval(() => view.tick(), 1000);
+// Mimic a sync refresh to validate preservation of open forms in a real browser.
+setInterval(() => view.update(), 5000);
+</script></html>

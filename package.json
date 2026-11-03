@@ -1,28 +1,34 @@
 {
   "name": "logseq-async-task-timer",
-  "version": "1.6.7",
-  "description": "Set countdown reminders on delegated/async tasks. Get notified when it's time to check back.",
+  "version": "2.1.2",
+  "description": "Async task reminders for Logseq 2.0.2+ DB graphs (2.x only).",
   "main": "dist/index.html",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build"
-  },
-  "dependencies": {
-    "@logseq/libs": "^0.0.17"
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node test/integration.mjs",
+    "preview:ui": "node test/preview-server.mjs"
   },
   "devDependencies": {
-    "vite": "^6.1.0",
-    "vite-plugin-logseq": "^1.1.2"
+    "jsdom": "^26.1.0",
+    "vite": "^6.1.0"
   },
   "logseq": {
     "id": "logseq-async-task-timer",
     "icon": "./icon.png",
-    "title": "Async Task Timer"
+    "title": "Async Task Timer",
+    "supportsDB": true,
+    "supportsDBOnly": true
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/hzphzp/logseq-async-task-timer.git"
   },
   "author": "huangzp",
-  "license": "MIT"
+  "license": "MIT",
+  "type": "module",
+  "supportsDB": true,
+  "supportsDBOnly": true,
+  "effect": false
 }
