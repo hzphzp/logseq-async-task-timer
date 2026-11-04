@@ -5,11 +5,13 @@ import { ReminderController } from './controller.js';
 import { NotificationQueue, sendWecom } from './notifications.js';
 import { TimerView, escapeHtml } from './ui.js';
 import { nextMorning, secondsFromMinutes } from './reminder.js';
-import { isDatabaseStarting, waitForDatabase } from './readiness.js';
+import { isDatabaseUnavailable, waitForDatabase } from './readiness.js';
 
 let notifier = null, view = null, ready = false, disposed = false, switching = 0;
 let debounce = null, tick = null, poll = null, settingsVersion = 0;
 let activating = false, startupRetry = null;
+let initialized = false, reconnectAttempts = 0, lastAutoRefresh = 0;
+let saveOutcomePending = false;
 const offHooks = [];
 const memory = new Map();
 let storage;
@@ -24,11 +26,20 @@ const report = error => {
   if (disposed) return;
   const text = error?.message || String(error);
   if (text.startsWith('Graph changed;')) return;
-  if (isDatabaseStarting(error) || error?.databaseStarting) {
+  if (isDatabaseUnavailable(error)) {
     ready = false;
-    view?.setBanner(tr('数据库正在启动，插件会自动重新连接；已有提醒记录保留。', 'Database is starting. The plugin will reconnect automatically; saved reminders are retained.'));
-    clearTimeout(startupRetry);
-    startupRetry = setTimeout(() => activate(), 1500);
+    controller.connectionLost = true;
+    clearTimeout(debounce); debounce = null;
+    view?.setBanner(tr('Logseq 数据库连接暂时不可用，正在自动重连；列表保留上次读取结果。', 'The Logseq database connection is temporarily unavailable. Reconnecting; the last loaded list is retained.'));
+    if (error.writeOutcomeUnknown) { saveOutcomePending = true; view?.setNotice(text, true); }
+    if (startupRetry === null) {
+      const delay = [1500, 3000, 10000, 30000][Math.min(reconnectAttempts++, 3)];
+      const sequence = switching;
+      startupRetry = setTimeout(() => {
+        startupRetry = null;
+        if (!disposed && sequence === switching) return reconnect();
+      }, delay);
+    }
     return;
   }
   view?.setNotice(text, true);
@@ -82,11 +93,38 @@ function botText(record) {
   return lines.join('\n');
 }
 
+async function reconnect() {
+  if (disposed) return;
+  if (!initialized) return activate();
+  const sequence = switching;
+  const assertCurrent = () => {
+    if (disposed || sequence !== switching) throw new Error('Graph changed; reconnect canceled.');
+  };
+  activating = true;
+  try {
+    const graph = await logseq.App.getCurrentGraph();
+    assertCurrent();
+    if (!graph || graph.url !== controller.graph) return activate();
+    // A failed probe returns to the backoff loop, rather than queuing reads.
+    await waitForDatabase(logseq, { attempts: 1, assertCurrent });
+    assertCurrent();
+    await controller.refresh({ missed: true });
+    assertCurrent();
+    ready = true; reconnectAttempts = 0;
+    view.setBanner(tr('连接已恢复，列表已重新核对。', 'Connection restored; the list has been refreshed.'));
+    if (saveOutcomePending) {
+      saveOutcomePending = false;
+      view.setNotice(tr('已重新读取保存结果，请核对任务当前状态。', 'The saved result has been re-read. Check the current task state.'));
+    }
+  } catch (error) { if (sequence === switching) report(error); }
+  finally { if (sequence === switching) activating = false; }
+}
+
 async function activate() {
   const sequence = ++switching;
-  activating = true; clearTimeout(startupRetry);
+  activating = true; initialized = false; saveOutcomePending = false; clearTimeout(startupRetry); startupRetry = null;
   ready = false; notifier?.dispose(); notifier = null; controller.dispose();
-  clearTimeout(debounce); view.mode = null; view.panel = null; view.rows.clear(); view.selected.clear();
+  clearTimeout(debounce); debounce = null; view.mode = null; view.panel = null; view.rows.clear(); view.selected.clear();
   view.banner = ''; view.notice = ''; logseq.hideMainUI();
   try {
     const graph = await logseq.App.getCurrentGraph();
@@ -107,7 +145,7 @@ async function activate() {
     });
     await controller.activate(graph.url, store);
     if (sequence !== switching || disposed) return;
-    ready = true;
+    ready = true; initialized = true; reconnectAttempts = 0;
     if (controller.migrated) logseq.UI.showMsg(tr(`已升级 ${controller.migrated} 条提醒，原始计时值已保留。`,
       `Upgraded ${controller.migrated} reminders; original values retained.`), 'success');
     if (notifier.storageError) view.setBanner(tr('本机推送记录无法保存，重启后的去重可能失效。', 'Local delivery receipts could not be saved; deduplication across restarts may be unavailable.'));
@@ -210,10 +248,18 @@ async function main() {
   const safe = fn => async (...args) => { try { await fn(...args); } catch (error) { report(error); } };
   offHooks.push(logseq.DB.onChanged(() => {
     if (!ready) return;
-    clearTimeout(debounce); debounce = setTimeout(() => controller.refresh().catch(report), 800);
+    // Bulk imports and sync transactions must not trigger a scan per edit.
+    // Timely deadlines still refresh through controller.tick independently.
+    if (debounce !== null) return;
+    debounce = setTimeout(() => {
+      debounce = null;
+      if (!ready || disposed) return;
+      lastAutoRefresh = Date.now();
+      return controller.refresh().catch(report);
+    }, Math.max(800, 5000 - (Date.now() - lastAutoRefresh)));
   }));
   offHooks.push(logseq.App.onCurrentGraphChanged(activate));
-  offHooks.push(logseq.App.onGraphAfterIndexed(() => { if (!ready && !activating) activate(); }));
+  offHooks.push(logseq.App.onGraphAfterIndexed(() => { if (!ready && !activating && startupRetry === null) activate(); }));
   for (const name of ['Async Timer', '异步任务计时']) logseq.Editor.registerSlashCommand(name, safe(async () => {
     const block = await logseq.Editor.getCurrentBlock();
     if (block) await openPicker(block.uuid, await logseq.Editor.getEditingBlockContent() || block.title);
@@ -223,6 +269,10 @@ async function main() {
   }));
   logseq.provideModel({
     toggleTimerPanel: safe(async () => {
+      if (!ready && initialized) {
+        view.showPanel(); logseq.showMainUI({ autoFocus: true });
+        return;
+      }
       if (activating) {
         logseq.UI.showMsg(tr('图谱正在加载或升级，完成后即可打开面板。', 'Graph is loading or upgrading; the panel will be available shortly.'), 'info');
         return;

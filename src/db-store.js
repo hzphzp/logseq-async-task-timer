@@ -1,5 +1,6 @@
 import { snapshot, transition, validate, isActive, ident, isFinished, STATUS_IDENT } from './reminder.js';
 import { resolveRecordTitles } from './titles.js';
+import { isBridgeTimeout } from './readiness.js';
 export { ident, isFinished, STATUS_IDENT, secondsFromMinutes } from './reminder.js';
 
 // Logseq 2.0.2 DB graphs only. Graph properties, never Markdown/localStorage,
@@ -79,6 +80,15 @@ const blockId = uuid => {
 export const RECORD_QUERY = `[:find (pull ?b ${pull}) :where
   (or [?b ${ref('state')}] [?b ${ref('history')}])]`;
 export const recordToken = record => JSON.stringify([snapshot(record), record?.history || null]);
+
+function saveFailure(error) {
+  if (!isBridgeTimeout(error)) return error;
+  const failure = new Error('Save response timed out; checking the saved result. Do not repeat this action yet. / 保存响应超时，正在确认结果，请暂勿重复操作。');
+  failure.bridgeTimeout = true;
+  failure.writeOutcomeUnknown = true;
+  failure.cause = error;
+  return failure;
+}
 
 function nativeRecord(block) {
   const value = key => block[ref(key)];
@@ -195,9 +205,16 @@ export class DbTimerStore {
     const title = decorate ? (isActive(next) || next.state === 'paused' ? decorateTimerTitle(block.title) : cleanTimerTitle(block.title)) : block.title;
     // Official 2.0.2 updateBlock batches all properties in one outliner transaction.
     // History and the native fields therefore cannot be saved half way through.
-    await this.api.Editor.updateBlock(uuid, title, { properties });
+    try {
+      await this.api.Editor.updateBlock(uuid, title, { properties });
+    } catch (error) {
+      // The host may already have committed before the response was lost.
+      // Never repeat the mutation; reconnect and read the authoritative record.
+      throw saveFailure(error);
+    }
     assertCurrent();
-    const saved = await this.get(uuid);
+    let saved;
+    try { saved = await this.get(uuid); } catch (error) { throw saveFailure(error); }
     assertCurrent();
     if (saved?.history?.events?.at(-1)?.id !== event.id || JSON.stringify(snapshot(saved)) !== JSON.stringify(next)) {
       throw new Error('Save verification failed; refresh before retrying / 保存校验失败，请刷新后检查。');

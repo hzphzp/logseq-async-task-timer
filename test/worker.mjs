@@ -33,7 +33,9 @@ export async function worker() {
   const server = cli('server', 'list').servers.find(s => s.graph === graph);
   async function ops(operations) {
     const response = await fetch(`${server['base-url']}/v1/invoke`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // execFileSync blocks this test process between requests. Do not reuse a
+      // socket whose idle close could not be observed while the CLI was running.
+      method: 'POST', headers: { 'Content-Type': 'application/json', Connection: 'close' },
       body: JSON.stringify({ method: 'thread-api/apply-outliner-ops',
         argsTransit: JSON.stringify([server.repo, operations.map(([name, args]) => [kw(name), args]), map({})]) }),
     });

@@ -1,6 +1,9 @@
 // logseq.ready means the plugin bridge is ready. In 2.0.2 the DB worker can
 // still be starting, especially immediately after an application restart.
 export const isDatabaseStarting = error => /db-worker has not been initialized/i.test(String(error?.message || error));
+// SDK call numbers identify a timed-out bridge request, not a task or graph id.
+export const isBridgeTimeout = error => !!error?.bridgeTimeout || /\[deferred timeout\]/i.test(String(error?.message || error));
+export const isDatabaseUnavailable = error => isDatabaseStarting(error) || isBridgeTimeout(error) || !!error?.databaseStarting;
 const PROBE = '[:find ?e :where [?e :db/ident :logseq.class/Root]]';
 
 export async function waitForDatabase(api, { assertCurrent = () => {}, attempts = 60,

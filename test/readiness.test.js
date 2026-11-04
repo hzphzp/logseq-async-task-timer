@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { waitForDatabase } from '../src/readiness.js';
+import { waitForDatabase, isBridgeTimeout, isDatabaseUnavailable } from '../src/readiness.js';
 
 test('plugin bridge readiness does not imply DB readiness; wait through startup and then continue', async () => {
   let calls = 0, waits = 0;
@@ -27,4 +27,14 @@ test('readiness only retries initialization errors; timeouts are explicitly reco
   await assert.rejects(waitForDatabase(api, { wait: async () => {} }), /Bad query/);
   api.DB.datascriptQuery = async () => null;
   await assert.rejects(waitForDatabase(api, { attempts: 2, wait: async () => {} }), error => error.databaseStarting === true);
+});
+
+test('SDK deferred timeouts are recoverable without concealing query or HTTP errors', () => {
+  for (const error of [new Error('[deferred timeout] async call #5416'), { message: '[deferred timeout] async call #8' }]) {
+    assert.equal(isBridgeTimeout(error), true);
+    assert.equal(isDatabaseUnavailable(error), true);
+  }
+  for (const error of [new Error('Bad query'), new Error('HTTP 500'), new Error('Invalid property')]) {
+    assert.equal(isDatabaseUnavailable(error), false);
+  }
 });

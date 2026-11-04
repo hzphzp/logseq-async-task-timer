@@ -85,6 +85,21 @@ try {
   assert.ok((await w.api.Editor.getBlock(linked)).title.includes(reference));
   w.cli('upsert', 'block', '--uuid', reference, '--content', 'Renamed reference target');
   assert.match((await store.get(linked)).blockContent, /Follow up Renamed reference target/);
+  // Simulate a host write that succeeds but loses its SDK response. The plugin
+  // must read the saved result later, never send the same write a second time.
+  const uncertain = w.create('Lost response fixture');
+  const updateBlock = w.api.Editor.updateBlock;
+  let writes = 0;
+  w.api.Editor.updateBlock = async (...args) => {
+    writes++; await updateBlock(...args);
+    throw new Error('[deferred timeout] async call #5416');
+  };
+  await assert.rejects(store.act(uncertain, 'schedule', { expiresAt: due }), e => e.writeOutcomeUnknown === true);
+  w.api.Editor.updateBlock = updateBlock;
+  assert.equal(writes, 1);
+  const confirmed = await store.get(uncertain);
+  assert.equal(confirmed.expiresAt, due);
+  assert.equal(confirmed.history.events.length, 1);
   await store.act(importedId, 'cancel');
   assert.equal(isActive(await store.get(importedId)), false);
   assert.equal(w.query(`[:find ?title :where [?b :block/uuid #uuid "${importedId}"] [?b :${imported} ?v] [?v :block/title ?title]]`)[0][0], oldRaw);
@@ -124,5 +139,5 @@ try {
   console.log(JSON.stringify({ ok: true, root: w.root, migration: '2/2, idempotent, original values retained',
     lifecycle: 'schedule, snooze, pause, resume, cancel, complete, undo',
     nativeProperties: 'datetime, number, string, JSON, status', nativeEdits: true,
-    historyPreserved: true, conflictsRejected: true, titleAndChildrenPreserved: true, fixtureCount, valid: true }, null, 2));
+    historyPreserved: true, conflictsRejected: true, titleAndChildrenPreserved: true, lostWriteResponseVerified: true, fixtureCount, valid: true }, null, 2));
 } finally { w.close(); }

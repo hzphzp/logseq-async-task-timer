@@ -1,6 +1,6 @@
 {
   "name": "logseq-async-task-timer",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "Async task reminders for Logseq 2.0.2+ DB graphs (2.x only).",
   "main": "dist/index.html",
   "scripts": {

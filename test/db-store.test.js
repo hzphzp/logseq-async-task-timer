@@ -78,3 +78,17 @@ test('decorations preserve literal TODO and multiline content', () => {
   assert.equal(cleanTimerTitle(decorateTimerTitle(text)), text);
   assert.equal(decorateTimerTitle(decorateTimerTitle(text)), decorateTimerTitle(text));
 });
+
+test('write and verification timeouts report uncertain outcomes without retrying writes', async () => {
+  for (const atVerification of [false, true]) {
+    let writes = 0, reads = 0;
+    const api = { Editor: { getBlock: async () => ({ title: 'Keep this' }),
+      updateBlock: async () => { writes++; if (!atVerification) throw new Error('[deferred timeout] async call #5416'); } } };
+    const store = new DbTimerStore(api);
+    store.ensureSchema = async () => {};
+    store.get = async () => { if (reads++ && atVerification) throw new Error('[deferred timeout] async call #5417'); return null; };
+    await assert.rejects(store.commit('id', null, active(), { id: 'once' }), error =>
+      error.writeOutcomeUnknown === true && error.bridgeTimeout === true && !error.message.includes('#5416'));
+    assert.equal(writes, 1);
+  }
+});

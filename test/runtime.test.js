@@ -51,3 +51,32 @@ test('switching graphs cancels queued writes and rejects stale reads', async () 
   await rejected; await switchGraph;
   assert.equal(writes, 0); assert.equal(h.controller.graph, 'b'); assert.equal(h.controller.records.size, 0);
 });
+
+test('a timed-out write stops queued mutations until a fresh authoritative read succeeds', async () => {
+  const h = harness([item('r', 1800000090000)]); await h.controller.activate('a', h.store);
+  let writes = 0;
+  h.store.act = async () => { writes++; throw new Error('[deferred timeout] async call #5416'); };
+  const results = await Promise.allSettled([h.controller.act('r', 'pause'), h.controller.act('r', 'cancel')]);
+  assert.ok(results.every(r => r.status === 'rejected'));
+  assert.equal(writes, 1); assert.equal(h.controller.connectionLost, true);
+  assert.equal(h.controller.records.get('r').state, 'active');
+  h.setRecords([item('r', null, { state: 'paused' })]);
+  await h.controller.refresh({ missed: true });
+  assert.equal(h.controller.connectionLost, false);
+  assert.equal(h.controller.records.get('r').state, 'paused');
+  assert.equal(writes, 1);
+});
+
+test('a late timeout from an old graph does not disconnect the new graph', async () => {
+  const h = harness([item('old', 1800000090000)]); await h.controller.activate('a', h.store);
+  let reject;
+  h.store.list = () => new Promise((_, fail) => { reject = fail; });
+  const scan = h.controller.refresh();
+  const rejected = assert.rejects(scan, /Graph changed/);
+  await new Promise(resolve => setImmediate(resolve));
+  await h.controller.activate('b', { migrate: async () => 0, list: async () => [item('new', 1800000090000)] });
+  reject(new Error('[deferred timeout] async call #5416'));
+  await rejected;
+  assert.equal(h.controller.connectionLost, false);
+  assert.deepEqual([...h.controller.records.keys()], ['new']);
+});

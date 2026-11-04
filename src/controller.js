@@ -1,4 +1,5 @@
 import { isActive } from './reminder.js';
+import { isDatabaseUnavailable } from './readiness.js';
 
 const deadlineKey = r => `${r.blockUuid}@${r.expiresAt}`;
 
@@ -7,6 +8,7 @@ export class ReminderController {
     Object.assign(this, { onChange, onDue, onBacklog, now });
     this.epoch = 0; this.graph = null; this.records = new Map(); this.handled = new Set();
     this.writes = Promise.resolve(); this.loading = null; this.lastTick = now();
+    this.connectionLost = false;
   }
 
   assert(epoch) {
@@ -16,6 +18,7 @@ export class ReminderController {
   async activate(graph, store) {
     const epoch = ++this.epoch;
     this.graph = graph; this.store = store;
+    this.connectionLost = false;
     this.records.clear(); this.handled.clear(); this.loading = null; this.lastTick = this.now();
     this.onChange();
     if (!graph) return;
@@ -37,6 +40,7 @@ export class ReminderController {
       this.assert(epoch);
       const now = this.now(), previous = this.records;
       this.records = new Map(records.map(r => [r.blockUuid, r]));
+      this.connectionLost = false;
       const due = [], backlog = [];
       for (const record of records) {
         if (!isActive(record) || record.expiresAt > now || this.handled.has(deadlineKey(record))) continue;
@@ -50,7 +54,9 @@ export class ReminderController {
       for (const record of due) { this.assert(epoch); this.onDue(record); }
     })();
     this.loading = promise;
-    try { await promise; } finally { if (this.loading === promise) this.loading = null; }
+    try { await promise; }
+    catch (error) { this.assert(epoch); throw error; }
+    finally { if (this.loading === promise) this.loading = null; }
   }
 
   async tick() {
@@ -62,9 +68,15 @@ export class ReminderController {
 
   async act(uuid, action, options = {}) {
     const epoch = this.epoch, store = this.store;
-    const promise = this.writes.catch(() => {}).then(() => {
+    const promise = this.writes.catch(() => {}).then(async () => {
       this.assert(epoch);
-      return store.act(uuid, action, { ...options, assertCurrent: () => this.assert(epoch) });
+      if (this.connectionLost) {
+        const error = new Error('Waiting for the database to reconnect / 正在等待数据库重新连接。');
+        error.bridgeTimeout = true;
+        throw error;
+      }
+      try { return await store.act(uuid, action, { ...options, assertCurrent: () => this.assert(epoch) }); }
+      catch (error) { this.assert(epoch); if (isDatabaseUnavailable(error)) this.connectionLost = true; throw error; }
     });
     this.writes = promise;
     const result = await promise;

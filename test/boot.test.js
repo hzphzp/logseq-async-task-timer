@@ -5,20 +5,20 @@ import { readFileSync } from 'node:fs';
 import { ReminderController } from '../src/controller.js';
 import { NotificationQueue, sendWecom } from '../src/notifications.js';
 import { assertSupported, cleanTimerTitle, INLINE_TIMER_RENDERER_TYPE, recordToken } from '../src/db-store.js';
-import { isDatabaseStarting, waitForDatabase } from '../src/readiness.js';
+import { isDatabaseUnavailable, waitForDatabase } from '../src/readiness.js';
 import { nextMorning, secondsFromMinutes } from '../src/reminder.js';
 import { escapeHtml } from '../src/ui.js';
-const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '') + '\nglobalThis.bootState = () => ({ ready, activating });';
-function boot({ interruptMigration = false } = {}) {
-  let startup, queries = 0, migrations = 0, unload;
-  const events = [], timeouts = new Map(), storage = new Map(); let timerId = 0;
+const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '') + '\nglobalThis.bootState = () => ({ ready, activating, records: [...controller.records.keys()] }); globalThis.refreshTest = () => controller.refresh().catch(report); globalThis.reportTest = report;';
+function boot({ interruptMigration = false, startupBridgeTimeout = false, records = [] } = {}) {
+  let startup, queries = 0, migrations = 0, unload, onChanged, graphReads = 0, listError = null;
+  const events = [], timeouts = new Map(), delays = [], storage = new Map(); let timerId = 0;
   const context = vm.createContext({
     ReminderController, NotificationQueue, sendWecom, assertSupported, cleanTimerTitle, INLINE_TIMER_RENDERER_TYPE, recordToken,
-    isDatabaseStarting, nextMorning, secondsFromMinutes, escapeHtml,
+    isDatabaseUnavailable, nextMorning, secondsFromMinutes, escapeHtml,
     waitForDatabase: (api, options) => waitForDatabase(api, { ...options, wait: async () => {} }),
     DbTimerStore: class {
       async migrate() { events.push('migrate'); migrations++; if (interruptMigration && migrations === 1) throw new Error('db-worker has not been initialized'); return 0; }
-      async list() { return []; }
+      async list() { if (listError) throw listError; return structuredClone(records); }
     },
     TimerView: class {
       constructor() { this.lang = 'zh'; this.rows = new Map(); this.selected = new Set(); }
@@ -28,20 +28,22 @@ function boot({ interruptMigration = false } = {}) {
       ready: fn => { startup = fn(); return startup; }, settings: { language: 'zh' },
       useSettingsSchema() {}, onSettingsChanged() {}, setMainUIInlineStyle() {}, provideStyle() {}, provideModel() {}, hideMainUI() {},
       beforeunload: fn => { unload = fn; }, UI: { showMsg: () => events.push('message') },
-      App: { getCurrentGraph: async () => ({ url: 'graph-a' }), getInfo: async () => ({ version: '2.0.2' }),
+      App: { getCurrentGraph: async () => { if (startupBridgeTimeout && !graphReads++) throw new Error('[deferred timeout] async call #5416'); return { url: 'graph-a' }; }, getInfo: async () => ({ version: '2.0.2' }),
         checkCurrentIsDbGraph: async () => true, onCurrentGraphChanged() {}, onGraphAfterIndexed() {},
         onMacroRendererSlotted() {}, registerUIItem() {} },
       Editor: { registerSlashCommand() {}, registerBlockContextMenuItem() {} },
-      DB: { onChanged() {}, datascriptQuery: async () => { events.push('probe'); queries++;
+      DB: { onChanged: fn => { onChanged = fn; }, datascriptQuery: async () => { events.push('probe'); queries++;
         if (queries < 3) throw new Error('db-worker has not been initialized'); return [[1]]; } },
     },
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
     document: { getElementById: () => ({}) }, window: {}, crypto: globalThis.crypto, console, Date,
-    setTimeout: fn => { timeouts.set(++timerId, fn); return timerId; }, clearTimeout: id => timeouts.delete(id),
+    setTimeout: (fn, delay) => { const id = ++timerId; delays.push(delay); timeouts.set(id, async () => { timeouts.delete(id); return fn(); }); return id; }, clearTimeout: id => timeouts.delete(id),
     setInterval: () => ++timerId, clearInterval() {},
   });
   vm.runInContext(source, context);
-  return { startup: () => startup, state: () => context.bootState(), events, timeouts, unload: () => unload() };
+  return { startup: () => startup, state: () => context.bootState(), events, timeouts, delays,
+    error: value => { listError = value; }, refresh: () => context.refreshTest(), report: error => context.reportTest(error),
+    changed: () => onChanged(), unload: () => unload() };
 }
 
 test('real plugin entry waits for the worker before migrating or reporting errors', async () => {
@@ -59,4 +61,40 @@ test('worker interruption during initialization schedules recovery instead of le
   assert.equal(h.events.filter(event => event === 'migrate').length, 2);
   assert.equal(h.events.includes('message'), false);
   await h.unload();
+});
+
+test('a bridge timeout before graph activation reconnects automatically without an error popup', async () => {
+  const h = boot({ startupBridgeTimeout: true }); await h.startup();
+  assert.equal(h.state().ready, false); assert.equal(h.timeouts.size, 1);
+  await [...h.timeouts.values()][0]();
+  assert.equal(h.state().ready, true); assert.equal(h.events.includes('message'), false);
+  await h.unload();
+});
+
+test('background timeouts keep cached reminders, back off once, and recover without remigration', async () => {
+  const h = boot({ records: [{ blockUuid: 'saved', state: 'active', expiresAt: Date.now() + 60000 }] });
+  await h.startup();
+  const error = new Error('[deferred timeout] async call #5416');
+  h.error(error); await h.refresh();
+  for (let i = 0; i < 20; i++) h.report(error);
+  assert.equal(h.state().ready, false); assert.deepEqual([...h.state().records], ['saved']);
+  assert.equal(h.timeouts.size, 1); assert.deepEqual(h.delays, [1500]);
+  await [...h.timeouts.values()][0]();
+  assert.equal(h.timeouts.size, 1); assert.deepEqual(h.delays, [1500, 3000]);
+  h.error(null); await [...h.timeouts.values()][0]();
+  assert.equal(h.state().ready, true); assert.equal(h.timeouts.size, 0);
+  assert.equal(h.events.filter(e => e === 'migrate').length, 1);
+  assert.equal(h.events.includes('message'), false);
+  await h.unload();
+});
+
+test('bulk changes coalesce refreshes; unloading cancels pending recovery', async () => {
+  const h = boot(); await h.startup();
+  for (let i = 0; i < 200; i++) h.changed();
+  assert.equal(h.timeouts.size, 1);
+  await [...h.timeouts.values()][0]();
+  h.changed(); assert.ok(h.delays.at(-1) >= 4000);
+  h.report(new Error('[deferred timeout] async call #2'));
+  assert.equal(h.timeouts.size, 1);
+  await h.unload(); assert.equal(h.timeouts.size, 0);
 });
