@@ -78,6 +78,21 @@ try {
   await store.act(plain, 'undo');
   assert.equal((await store.get(plain)).taskStatus, '');
   assert.ok(isActive(await store.get(plain)));
+  // Regression: completing a native Doing task directly creates its first
+  // reminder history entry and must also change the native task to Done.
+  const nativeOnly = w.create('Doing task without reminder history');
+  await store.setStatus(nativeOnly, 'doing');
+  assert.equal(await store.get(nativeOnly), null);
+  const firstCompletion = await store.act(nativeOnly, 'complete');
+  assert.equal(firstCompletion.state, 'completed');
+  assert.equal(firstCompletion.taskStatus, 'logseq.property/status.done');
+  assert.equal(firstCompletion.history.events.length, 1);
+  assert.equal(firstCompletion.history.events[0].before.taskStatus, 'logseq.property/status.doing');
+  assert.ok(canUndo(firstCompletion));
+  const firstUndo = await store.act(nativeOnly, 'undo');
+  assert.equal(firstUndo.taskStatus, 'logseq.property/status.doing');
+  assert.equal(firstUndo.state, 'canceled');
+  assert.equal(firstUndo.history.events.length, 2);
   const reference = w.create('Reference target');
   const linked = w.create(`Follow up [[${reference}]]`);
   await store.act(linked, 'schedule', { expiresAt: due });
@@ -139,5 +154,6 @@ try {
   console.log(JSON.stringify({ ok: true, root: w.root, migration: '2/2, idempotent, original values retained',
     lifecycle: 'schedule, snooze, pause, resume, cancel, complete, undo',
     nativeProperties: 'datetime, number, string, JSON, status', nativeEdits: true,
-    historyPreserved: true, conflictsRejected: true, titleAndChildrenPreserved: true, lostWriteResponseVerified: true, fixtureCount, valid: true }, null, 2));
+    historyPreserved: true, conflictsRejected: true, titleAndChildrenPreserved: true, lostWriteResponseVerified: true,
+    firstNativeCompletionAndUndoVerified: true, fixtureCount, valid: true }, null, 2));
 } finally { w.close(); }

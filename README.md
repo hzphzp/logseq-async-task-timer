@@ -2,7 +2,7 @@
 
 给异步任务安排下一次跟进，保留每次检查、延后和结束提醒的记录。
 
-当前维护版本：**v2.1.3**（本地超时修复）· [修复说明](docs/releases/v2.1.3.md) · [已发布 v2.1.2](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.2) · [English](#english)
+当前维护版本：**v2.1.4**（本地保存校验修复）· [修复说明](docs/releases/v2.1.4.md) · [已发布 v2.1.2](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.2) · [English](#english)
 
 > [!IMPORTANT]
 > **兼容性重大变更：v2.1.2 仅支持 Logseq 2.0.2 起的 2.x 数据库图谱（DB graphs）。**
@@ -17,6 +17,10 @@
 这次更新采用数据库原生属性保存提醒，增加暂停、恢复、历史、撤销、项目筛选和批量跟进，
 并保留任务原有状态。还修复了数据库尚未就绪时的启动报错，以及标题显示为内部 `[[UUID]]` 的问题。
 完整变更见 [v2.1.2 发布说明](docs/releases/v2.1.2.md)。
+
+## v2.1.4 首次完成与保存校验
+
+直接完成一个尚无插件提醒历史的原生任务时，现在会同时保存 Logseq 原生 Done 状态和首条完成记录，避免错误提示“保存校验失败”。撤销可恢复原来的任务状态。保存与撤销校验先规范化字段，属性键的排列顺序不会造成误判。
 
 ## v2.1.3 连接恢复
 

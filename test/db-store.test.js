@@ -32,6 +32,8 @@ test('undo restores the preceding reminder and native status but rejects remote 
   const before = active(), after = transition(before, 'complete', {}, now);
   const record = { ...after, history: { version: 1, events: [{ id: 'event', action: 'complete', before: snapshot(before), after: snapshot(after) }] } };
   assert.ok(canUndo(record));
+  assert.ok(canUndo({ ...record, history: { version: 1, events: [{ ...record.history.events[0],
+    after: Object.fromEntries(Object.entries(record.history.events[0].after).reverse()) }] } }));
   assert.deepEqual(transition(record, 'undo', {}, now), snapshot(before));
   for (const changes of [{ taskStatus: 'logseq.property/status.todo' }, { owner: 'Elsewhere' }, { expiresAt: now + 1 }]) {
     assert.equal(canUndo({ ...record, ...changes }), false);
@@ -86,9 +88,30 @@ test('write and verification timeouts report uncertain outcomes without retrying
       updateBlock: async () => { writes++; if (!atVerification) throw new Error('[deferred timeout] async call #5416'); } } };
     const store = new DbTimerStore(api);
     store.ensureSchema = async () => {};
+    store.statusId = async () => 42;
     store.get = async () => { if (reads++ && atVerification) throw new Error('[deferred timeout] async call #5417'); return null; };
     await assert.rejects(store.commit('id', null, active(), { id: 'once' }), error =>
       error.writeOutcomeUnknown === true && error.bridgeTimeout === true && !error.message.includes('#5416'));
     assert.equal(writes, 1);
   }
+});
+
+test('completing a native task without a previous reminder writes Done and verifies its first history event', async () => {
+  let saved = null, status = 'logseq.property/status.doing', written;
+  const next = { ...active(), state: 'completed', expiresAt: null, taskStatus: 'logseq.property/status.done' };
+  const event = { id: 'first-completion', action: 'complete', at: now, after: next };
+  const api = { Editor: { getBlock: async () => ({ title: 'A native task' }),
+    updateBlock: async (_id, _title, { properties }) => {
+      written = properties;
+      if (properties['logseq.property/status'] === 42) status = 'logseq.property/status.done';
+      saved = { ...next, taskStatus: status, history: { version: 1, events: [event] } };
+    } } };
+  const store = new DbTimerStore(api);
+  store.ensureSchema = async () => {};
+  store.statusId = async s => { assert.equal(s, 'logseq.property/status.done'); return 42; };
+  store.get = async () => saved;
+  const result = await store.commit('id', null, next, event);
+  assert.equal(written['logseq.property/status'], 42);
+  assert.equal(result.taskStatus, 'logseq.property/status.done');
+  assert.equal(result.history.events.length, 1);
 });

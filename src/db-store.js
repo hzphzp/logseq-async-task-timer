@@ -195,13 +195,16 @@ export class DbTimerStore {
     await this.ensureSchema(assertCurrent);
     const history = { version: 1, events: [...(before?.history?.events || []), event] };
     const properties = Object.fromEntries(Object.keys(FIELDS).map(key => [PREFIX + FIELDS[key], key === 'history' ? history : next[key] || null]));
-    if (before && ident(before.taskStatus) !== ident(next.taskStatus)) properties[STATUS_IDENT] = await this.statusId(next.taskStatus);
     const current = await this.get(uuid);
     assertCurrent();
     if (recordToken(current) !== recordToken(before)) throw new Error('Reminder changed on another device; refresh and retry / 提醒已改变，请刷新后重试。');
     const block = await this.api.Editor.getBlock(uuid, { includePage: true });
     assertCurrent();
     if (!block) throw new Error('The task was deleted / 任务已被删除。');
+    // A native task can be completed directly, before it has reminder history.
+    // Its requested status still has to be saved alongside that first event.
+    if (ident(before?.taskStatus) !== ident(next.taskStatus)) properties[STATUS_IDENT] = await this.statusId(next.taskStatus);
+    assertCurrent();
     const title = decorate ? (isActive(next) || next.state === 'paused' ? decorateTimerTitle(block.title) : cleanTimerTitle(block.title)) : block.title;
     // Official 2.0.2 updateBlock batches all properties in one outliner transaction.
     // History and the native fields therefore cannot be saved half way through.
@@ -216,7 +219,7 @@ export class DbTimerStore {
     let saved;
     try { saved = await this.get(uuid); } catch (error) { throw saveFailure(error); }
     assertCurrent();
-    if (saved?.history?.events?.at(-1)?.id !== event.id || JSON.stringify(snapshot(saved)) !== JSON.stringify(next)) {
+    if (saved?.history?.events?.at(-1)?.id !== event.id || JSON.stringify(snapshot(saved)) !== JSON.stringify(snapshot(next))) {
       throw new Error('Save verification failed; refresh before retrying / 保存校验失败，请刷新后检查。');
     }
     return saved;

@@ -28,7 +28,7 @@ export function validate(record) {
 export function canUndo(record) {
   const last = record?.history?.events?.at(-1);
   return !!last && !['import', 'undo'].includes(last.action) &&
-    JSON.stringify(snapshot(record)) === JSON.stringify(last.after);
+    JSON.stringify(snapshot(record)) === JSON.stringify(snapshot(last.after));
 }
 
 export function transition(record, action, options = {}, now = Date.now()) {
