@@ -2,21 +2,41 @@
 
 给异步任务安排下一次跟进，保留每次检查、延后和结束提醒的记录。
 
-当前维护版本：**v2.1.4**（本地保存校验修复）· [修复说明](docs/releases/v2.1.4.md) · [已发布 v2.1.2](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.2) · [English](#english)
+**v2.1.10** · [发布说明](docs/releases/v2.1.10.md) · [下载安装包](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.10) · [English](#english)
 
 > [!IMPORTANT]
-> **兼容性重大变更：v2.1.2 仅支持 Logseq 2.0.2 起的 2.x 数据库图谱（DB graphs）。**
+> **v2.1.10 仅支持 Logseq 2.0.2 起的 2.x 数据库图谱（DB graphs）。**
 > Logseq 2.0.0 / 2.0.1、0.x 和文件图谱均不受支持；3.x 也未开放支持。
 > 本项目已停止旧版适配。仍在使用旧版 Logseq 或文件图谱的用户，请保留
 > [v1.6.7](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v1.6.7)，不要安装本次更新。
 
-插件版本 **2.1.2** 与 Logseq 客户端版本 **2.0.2** 是两个独立版本号。
+插件版本 **2.1.10** 与 Logseq 客户端版本 **2.0.2** 是两个独立版本号。
 运行时接受的客户端范围为 `>= 2.0.2, < 3.0.0`，且必须是数据库图谱；
 实际验证的客户端为 **Logseq Desktop 2.0.2，revision `533ac43`**，未逐一验证其他 2.x 版本。
 
-这次更新采用数据库原生属性保存提醒，增加暂停、恢复、历史、撤销、项目筛选和批量跟进，
+自 v2.1.2 起，插件采用数据库原生属性保存提醒，增加暂停、恢复、历史、撤销、项目筛选和批量跟进，
 并保留任务原有状态。还修复了数据库尚未就绪时的启动报错，以及标题显示为内部 `[[UUID]]` 的问题。
 完整变更见 [v2.1.2 发布说明](docs/releases/v2.1.2.md)。
+
+「已到期」按到期时间从近到远排列；今天和以后的任务按最早截止时间在前排列。面板打开期间，新到期的任务会自动移到「已到期」顶部。
+
+## v2.1.8 跟进与连续处理
+
+已有提醒点「跟进」即可输入或选预设。完成一项任务期间，可以继续处理面板里的其他任务。同一块出现在多个位置时，各处都显示保存进度。新的任务仍须先读取，所有写入仍会核对当前数据库；遇到另一台设备的修改时，插件会保留草稿并提示核对。
+
+## v2.1.6 点击标题定位原任务
+
+点击面板里的任务标题，直接打开原任务块及其子块，可通过 Logseq 的面包屑返回所属页面或日志。修复旧滚动接口只打开日志页、未能定位具体块的问题；不依赖父块是否展开。块已删除或跳转失败时保留面板并提示，关闭面板或切换图谱后不再执行尚未发出的跳转。
+
+继续仅支持 **Logseq >= 2.0.2, < 3.0.0 的 DB 图谱**；无需迁移数据，不修改任务状态或提醒时间。
+
+## v2.1.5 点击响应与保存性能
+
+正文中的「跟进」先打开设置窗口，再读取当前任务；工具栏面板先显示已有列表，再后台核对。读取期间会显示进度并暂时禁用保存，避免用过期状态提交。
+
+「完成」和保存跟进时间不再在前后扫描全部提醒。写入并核验成功后直接更新当前记录；晚到的旧扫描不会覆盖新状态。标题链接只在展示时解析，属性定义一次查询，减少与 Logseq 的往返调用。保存时显示「保存中…」，同一内联按钮的连续点击只执行一次操作。
+
+保存校验、跨设备冲突检查、任务原生状态、撤销历史及超时后不重复写入的规则保留。后台仍会核对其他设备的更改。本版本继续仅支持 **Logseq >= 2.0.2, < 3.0.0 的 DB 图谱**，无需迁移数据；替换插件后重载生效。
 
 ## v2.1.4 首次完成与保存校验
 
@@ -24,7 +44,7 @@
 
 ## v2.1.3 连接恢复
 
-遇到 Logseq 插件通信层的 `[deferred timeout] async call #…` 时，插件保留上次读取的提醒列表，并按 1.5、3、10、30 秒逐步延长间隔重新连接，不再连续弹出原始超时错误。恢复后重新读取真实记录；断线期间新到期的提醒汇总到面板，不补发企业微信。
+遇到 Logseq 插件通信层的 `[deferred timeout] async call #…` 时，插件保留上次读取的提醒列表，并按 1.5、3、10、30 秒逐步延长间隔重新连接，不再连续弹出原始超时错误。该版本恢复后会重新读取真实记录。当前版本对断线期间到期的任务按下文的十分钟时限处理。
 
 保存时超时可能只是响应丢失。插件不会自动重发写入或执行排队的后续修改，而是重新读取结果后提示核对。批量导入／同步引发的后台刷新最多每 5 秒启动一次；到期检查与手动刷新保持即时。
 
@@ -62,8 +82,8 @@
 1. 备份原图谱与插件设置。
 2. 文件图谱用户先使用 Logseq 官方导入功能迁入数据库图谱，并确认需要保留的计时值已导入；
    继续使用文件图谱时，应保留 v1.6.7。
-3. 在支持的 Logseq 客户端上安装插件 v2.1.2，并重载插件。
-4. 核对面板中的任务、到期时间和历史；同一图谱的其他设备也升级到 v2.1.2。
+3. 在支持的 Logseq 客户端上安装插件 v2.1.10，并重载插件。
+4. 核对面板中的任务、到期时间和历史；同一图谱的其他设备也升级到 v2.1.10。
 
 首次加载新版插件时，自动将**已经存在于数据库中的完整 `async-timer` 值**升级为原生属性。
 此前使用插件 2.0.0 DB 版本的记录也适用此流程。
@@ -80,13 +100,14 @@ Logseq 导入过程中没有带入数据库的计时数据，需要从原图谱�
 
 只有时长、没有有效到期时间的残留记录不会被推算为计时器，也不会被删除。
 升级中断后，下次重载继续处理未升级记录。
-多设备应全部升级至 **v2.1.2**；旧插件只认识旧值，无法理解新的暂停、取消和历史。
+多设备应全部升级至 **v2.1.10**；旧插件只认识旧值，无法理解新的暂停、取消和历史。
 回退插件文件不能回退数据。确实需要回退时，请使用升级前的完整图谱备份，并评估备份之后的新笔记。
 
 ## 原生属性与查询
 
 提醒数据和历史保存在 Logseq 图谱中，随 DB Sync 同步。其他设备也需要安装本插件。
 原生字段是实际读取来源，直接在 Logseq 修改时间、负责人或项目后，插件会重新读取。
+插件首次创建 `reminder-state`、`next-follow-up` 和 `last-checked` 时，默认在笔记正文中隐藏这三项。所有字段均可用于查询，提醒状态和到期时间也可在时钟面板查看。已有图谱沿用各自的属性显示设置。
 字段统一使用 `plugin.property.logseq-async-task-timer/` 命名空间：
 
 - `next-follow-up`：下次跟进，原生 `datetime`；暂停或结束提醒后清空。
@@ -119,7 +140,8 @@ Logseq 导入过程中没有带入数据库的计时数据，需要从原图谱�
 提醒不会强制打开面板打断正在输入的内容。
 
 关闭 Logseq、插件未运行或电脑休眠时，插件无法执行提醒。
-重载、启动和休眠恢复后只汇总已经错过的提醒，不批量补发企业微信。
+运行中的定时器单独等待最近的截止时间。切到后台或短暂休眠后，迟到 10 分钟以内的任务仍会提醒一次。数据库短暂断线后会先核对任务是否仍有效，再按同一时限提醒。超过 10 分钟或启动时已过期的任务只汇总到面板。
+在插件面板中点击后可启用短提示音。如果窗口无法播放，插件会请求系统通知带声音，实际效果取决于系统的通知和声音设置。
 单独的同步服务器只负责同步笔记，不会替关闭的客户端运行此插件。
 
 ### 企业微信群机器人
@@ -140,15 +162,15 @@ Webhook、设备 ID 和推送回执属于本机设置，不随图谱同步。
 
 ## 安装与更新
 
-从 [v2.1.2 Release](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.2)
-下载 **`logseq-async-task-timer-v2.1.2.zip`**（已构建的插件包）。
+从 [v2.1.10 Release](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.10)
+下载 **`logseq-async-task-timer-v2.1.10.zip`**（已构建的插件包）。
 GitHub 自动生成的 “Source code” 压缩包用于源码开发。
 
 将插件包中的 `logseq-async-task-timer` 目录放到 `~/.logseq/plugins/`，
 或在 Logseq 插件界面使用「Load unpacked plugin」选择该目录。
 替换已安装文件后，在插件界面点「重载」，或重启 Logseq。
 用户设置位于 `~/.logseq/settings/`，替换插件文件不会覆盖这些设置。
-安装后确认插件版本为 `2.1.2`；市场更新的可见时间以 Logseq 市场为准。
+安装后确认插件版本为 `2.1.10`；市场更新的可见时间以 Logseq 市场为准。
 
 ## 开发与验证
 
@@ -193,12 +215,12 @@ npm 上的旧 `@logseq/libs` 0.0.17 不用于此版本。
 ## English
 
 > [!IMPORTANT]
-> **Breaking compatibility change: plugin v2.1.2 requires Logseq 2.0.2+ within the 2.x series and a DB graph.**
+> **Plugin v2.1.10 requires Logseq 2.0.2+ within the 2.x series and a DB graph.**
 > Logseq 0.x, 2.0.0, 2.0.1, file graphs, and 3.x are not supported.
 > Legacy support has been discontinued. Existing file-graph users should keep
 > [v1.6.7](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v1.6.7) and must not install this release.
 
-The **plugin version (2.1.2)** is separate from the **Logseq client version (2.0.2)**.
+The **plugin version (2.1.10)** is separate from the **Logseq client version (2.0.2)**.
 The runtime accepts Logseq `>= 2.0.2, < 3.0.0` DB graphs. The tested client is Logseq Desktop
 2.0.2, revision `533ac43`; other 2.x versions have not each been verified.
 
@@ -207,22 +229,22 @@ history survives each action, and the last action can be undone when the record 
 
 The panel groups overdue, today, later, paused and archived reminders. It supports search, project filtering,
 bulk follow-ups, calendar presets, native datetime/owner/project properties, and preserves unsaved inputs during refresh.
+Newly created reminder state, next follow-up time and last-checked time properties are hidden on note blocks by default. All three can be queried. Existing graphs use their own visibility settings.
 Complete DB-imported timer values are migrated once, with their original properties and source values retained.
 Back up first. File-graph users must use Logseq's official import into a DB graph and verify that their complete
 timer values survived that import before upgrading. This plugin does not import Markdown or recover legacy caches.
-Upgrade every device to **v2.1.2**; old plugin versions do not understand the new state model.
+Upgrade every device to **v2.1.10**; old plugin versions do not understand the new state model.
 Startup now waits for the DB worker, and stored UUID references display their readable titles without changing the notes.
 
 WeCom delivery requires HTTP success and `errcode = 0`. Failed live deliveries retry at most three times,
-with graph-scoped local receipts and manual retry after interruption. Startup and sleep recovery summarize backlog
-without pushing old reminders. Logseq must be running. Network timeouts can still cause duplicate delivery.
+with graph-scoped local receipts and manual retry after interruption. A background or wake-up delay of up to ten minutes still delivers a live deadline once. The same deadline check runs after reconnection. Startup and older deadlines are summarized without sending a backlog. Logseq must be running. Network timeouts can still cause duplicate delivery.
 
 Build with `npm ci`, `npm test`, `npm run build`. Integration tests use an isolated Logseq 2.0.2 worker.
 `npm run preview:ui` starts a mock UI fixture at `http://127.0.0.1:5178/`. Reload the installed plugin after replacing files.
 
-Download the built `logseq-async-task-timer-v2.1.2.zip` from the
-[release page](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.2).
-See [the full release notes](docs/releases/v2.1.2.md) for compatibility, migration, validation and limitations.
+Download the built `logseq-async-task-timer-v2.1.10.zip` from the
+[release page](https://github.com/hzphzp/logseq-async-task-timer/releases/tag/v2.1.10).
+See [the full release notes](docs/releases/v2.1.10.md) for compatibility, migration, validation and limitations.
 
 ## License
 

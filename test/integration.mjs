@@ -9,6 +9,23 @@ try {
   const store = new DbTimerStore(w.api);
   const due = Date.now() + 3600000;
   assert.deepEqual(await store.list(), []);
+  // New imports must be discoverable on a later refresh, even before the
+  // native number schema exists. The legacy formats use strings or value nodes.
+  const importedAttrs = ['user.property/async-timer-first', 'user.property/async-timer-second'];
+  const legacyId = w.create('Legacy discovery fixture');
+  for (const [index, attr] of importedAttrs.entries()) {
+    await w.op('upsert-property', [kw(attr), map({ 'logseq.property/type': kw(index ? 'default' : 'string'),
+      'db/cardinality': kw('db.cardinality/one') }), map({ 'property-name': 'async-timer' })]);
+    await w.api.Editor.upsertBlockProperty(legacyId, attr, `${due}~300`);
+    if (!index) {
+      const [legacy] = await store.list();
+      assert.equal(legacy.blockUuid, legacyId);
+      assert.equal(legacy.legacy, true);
+      assert.equal(legacy.totalSeconds, 300);
+    }
+  }
+  await assert.rejects(store.list(), /Multiple timer properties/);
+  await w.api.Editor.removeBlockProperty(legacyId, importedAttrs[0]);
   const id = w.create('TODO is literal text\nPreserve the second line');
   w.cli('upsert', 'block', '--target-uuid', id, '--content', 'Child stays here');
   await store.setStatus(id, 'todo');
@@ -17,6 +34,16 @@ try {
   assert.equal(record.expiresAt, due);
   assert.equal(record.owner, 'Owner');
   assert.equal(record.history.events.length, 1);
+  assert.equal(await store.migrate(), 1);
+  // Both legacy values now coexist on an already migrated reminder. Only the
+  // native record should appear in the list, alongside the first scheduled task.
+  await w.api.Editor.upsertBlockProperty(legacyId, importedAttrs[0], `${due}~300`);
+  const migratedList = await store.list();
+  assert.equal(migratedList.length, 2);
+  const migrated = migratedList.find(r => r.blockUuid === legacyId);
+  assert.equal(migrated.legacy, false);
+  assert.equal(migrated.history.events.length, 1);
+  w.cli('remove', 'block', '--uuid', legacyId);
   const initialToken = recordToken(record);
   record = await store.act(id, 'schedule', { expiresAt: due + 10000, expected: initialToken });
   assert.equal(record.taskStatus, 'logseq.property/status.todo');
@@ -82,6 +109,19 @@ try {
   // reminder history entry and must also change the native task to Done.
   const nativeOnly = w.create('Doing task without reminder history');
   await store.setStatus(nativeOnly, 'doing');
+  // Opening an untracked task in a migrated graph needs only its indexed
+  // snapshot. No editor/children read or schema mutation on this path.
+  let pickerReads = 0;
+  const reader = new DbTimerStore({ DB: { datascriptQuery: q => {
+    pickerReads++; return w.api.DB.datascriptQuery(q);
+  } } });
+  await reader.list(); pickerReads = 0;
+  assert.deepEqual(await reader.get(nativeOnly, { withBlock: true }), {
+    exists: true, record: null, title: 'Doing task without reminder history',
+  });
+  assert.equal(pickerReads, 1);
+  assert.equal(reader.schemaReady, false, 'readable fields do not bypass write preflight');
+  assert.deepEqual(await reader.get(crypto.randomUUID(), { withBlock: true }), { exists: false, record: null, title: '' });
   assert.equal(await store.get(nativeOnly), null);
   const firstCompletion = await store.act(nativeOnly, 'complete');
   assert.equal(firstCompletion.state, 'completed');

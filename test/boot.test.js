@@ -11,7 +11,7 @@ import { escapeHtml } from '../src/ui.js';
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '') + '\nglobalThis.bootState = () => ({ ready, activating, records: [...controller.records.keys()] }); globalThis.refreshTest = () => controller.refresh().catch(report); globalThis.reportTest = report;';
 function boot({ interruptMigration = false, startupBridgeTimeout = false, records = [] } = {}) {
   let startup, queries = 0, migrations = 0, unload, onChanged, graphReads = 0, listError = null;
-  const events = [], timeouts = new Map(), delays = [], storage = new Map(); let timerId = 0;
+  const events = [], messages = [], timeouts = new Map(), delays = [], storage = new Map(); let timerId = 0;
   const context = vm.createContext({
     ReminderController, NotificationQueue, sendWecom, assertSupported, cleanTimerTitle, INLINE_TIMER_RENDERER_TYPE, recordToken,
     isDatabaseUnavailable, nextMorning, secondsFromMinutes, escapeHtml,
@@ -22,12 +22,12 @@ function boot({ interruptMigration = false, startupBridgeTimeout = false, record
     },
     TimerView: class {
       constructor() { this.lang = 'zh'; this.rows = new Map(); this.selected = new Set(); }
-      update() {} setNotice() {} setBanner() {}
+      update() {} setNotice() {} setBanner() {} resetInteraction() {}
     },
     logseq: {
       ready: fn => { startup = fn(); return startup; }, settings: { language: 'zh' },
       useSettingsSchema() {}, onSettingsChanged() {}, setMainUIInlineStyle() {}, provideStyle() {}, provideModel() {}, hideMainUI() {},
-      beforeunload: fn => { unload = fn; }, UI: { showMsg: () => events.push('message') },
+      beforeunload: fn => { unload = fn; }, UI: { showMsg: (_message, kind) => { messages.push(kind); events.push('message'); } },
       App: { getCurrentGraph: async () => { if (startupBridgeTimeout && !graphReads++) throw new Error('[deferred timeout] async call #5416'); return { url: 'graph-a' }; }, getInfo: async () => ({ version: '2.0.2' }),
         checkCurrentIsDbGraph: async () => true, onCurrentGraphChanged() {}, onGraphAfterIndexed() {},
         onMacroRendererSlotted() {}, registerUIItem() {} },
@@ -41,7 +41,7 @@ function boot({ interruptMigration = false, startupBridgeTimeout = false, record
     setInterval: () => ++timerId, clearInterval() {},
   });
   vm.runInContext(source, context);
-  return { startup: () => startup, state: () => context.bootState(), events, timeouts, delays,
+  return { startup: () => startup, state: () => context.bootState(), events, messages, timeouts, delays,
     error: value => { listError = value; }, refresh: () => context.refreshTest(), report: error => context.reportTest(error),
     changed: () => onChanged(), unload: () => unload() };
 }
@@ -97,4 +97,43 @@ test('bulk changes coalesce refreshes; unloading cancels pending recovery', asyn
   h.report(new Error('[deferred timeout] async call #2'));
   assert.equal(h.timeouts.size, 1);
   await h.unload(); assert.equal(h.timeouts.size, 0);
+});
+
+test('desktop sound falls back to the system notification until the panel unlocks audio', () => {
+  const messages = [], notifications = [];
+  let tones = 0;
+  class Audio {
+    state = 'suspended';
+    resume() { this.state = 'running'; return Promise.resolve(); }
+    createOscillator() { return { frequency: {}, connect() {}, start() { tones++; }, stop() {} }; }
+    createGain() { return { gain: {}, connect() {} }; }
+  }
+  class Notice {
+    static permission = 'granted';
+    constructor(_title, options) { notifications.push(options); }
+  }
+  const logseq = { settings: { soundEnabled: true }, ready: () => Promise.resolve(),
+    UI: { showMsg: message => messages.push(message) } };
+  const context = vm.createContext({ logseq, localStorage: { getItem: () => 'test', setItem() {} },
+    window: { AudioContext: Audio, Notification: Notice }, Notification: Notice, ReminderController, cleanTimerTitle });
+  vm.runInContext(source + '\nglobalThis.alert = () => controller.onDue({blockContent:"Test",blockUuid:"test"}); globalThis.unlock = unlockAudio;', context);
+  context.alert(); context.unlock(); context.alert();
+  logseq.settings.soundEnabled = false; context.alert();
+  assert.deepEqual(notifications.map(n => n.silent), [false, true, true]);
+  assert.equal(tones, 1);
+  assert.equal(messages.length, 3);
+});
+
+
+test('reconnection delivers a still-active new deadline and drops a remote completion', async () => {
+  const records = ['due', 'done'].map(blockUuid => ({ blockUuid, state: 'active', expiresAt: Date.now() + 60000 }));
+  const h = boot({ records });
+  await h.startup();
+  h.report(new Error('[deferred timeout] async call #5416'));
+  for (const r of records) r.expiresAt = Date.now();
+  records[1].taskStatus = 'logseq.property/status.done';
+  await [...h.timeouts.values()][0]();
+  await h.refresh();
+  assert.deepEqual(h.messages, ['warning']);
+  await h.unload();
 });

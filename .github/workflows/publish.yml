@@ -46,8 +46,8 @@ jobs:
           cp README.md package.json icon.png logo.svg LICENSE "$PLUGIN_NAME/"
           cp -R vendor dist "$PLUGIN_NAME/"
           cp "docs/releases/${GITHUB_REF_NAME}.md" "$PLUGIN_NAME/RELEASE_NOTES.md"
-          mkdir -p "$PLUGIN_NAME/docs/releases"
-          cp "docs/releases/${GITHUB_REF_NAME}.md" "$PLUGIN_NAME/docs/releases/"
+          mkdir -p "$PLUGIN_NAME/docs"
+          cp -R docs/releases "$PLUGIN_NAME/docs/"
           zip -r "${PLUGIN_NAME}-${GITHUB_REF_NAME}.zip" "$PLUGIN_NAME"
       - name: Publish release with notes and assets
         env:

@@ -1,5 +1,6 @@
 import '../vendor/logseq-sdk/lsplugin.user.js';
 import './style.css';
+import deadlineWorkerUrl from './deadline-worker.js?worker&url';
 import { DbTimerStore, assertSupported, cleanTimerTitle, INLINE_TIMER_RENDERER_TYPE, recordToken } from './db-store.js';
 import { ReminderController } from './controller.js';
 import { NotificationQueue, sendWecom } from './notifications.js';
@@ -9,9 +10,15 @@ import { isDatabaseUnavailable, waitForDatabase } from './readiness.js';
 
 let notifier = null, view = null, ready = false, disposed = false, switching = 0;
 let debounce = null, tick = null, poll = null, settingsVersion = 0;
+let deadlineWorker = null, armedDeadline = null, audioContext = null;
 let activating = false, startupRetry = null;
 let initialized = false, reconnectAttempts = 0, lastAutoRefresh = 0;
 let saveOutcomePending = false;
+let pickerSequence = 0;
+const inlineActions = new Map(), inlineSlots = new Map();
+// Host macro slots are ephemeral. Keep recent occurrences and re-register the
+// clicked one even if its slot was evicted while browsing a long graph.
+const MAX_INLINE_SLOTS = 128;
 const offHooks = [];
 const memory = new Map();
 let storage;
@@ -47,7 +54,11 @@ const report = error => {
 };
 
 const controller = new ReminderController({
-  onChange: () => view?.update(),
+  onChange: () => {
+    armDeadline();
+    view?.update();
+    for (const [slot, entry] of inlineSlots) paintSlot(slot, entry);
+  },
   onBacklog: records => {
     const text = tr(`有 ${records.length} 项提醒在加载或休眠期间到期，已汇总到面板；没有补发企业微信。`,
       `${records.length} reminders were missed while away. Review them in the panel; no backlog was pushed.`);
@@ -55,27 +66,46 @@ const controller = new ReminderController({
   },
   onDue: record => {
     const title = cleanTimerTitle(record.blockContent).split('\n')[0].slice(0, 120);
+    notifier?.enqueue(record);
+    const soundEnabled = logseq.settings?.soundEnabled !== false;
+    const played = soundEnabled && playTone();
     logseq.UI.showMsg(tr(`该跟进了：${title}`, `Time to follow up: ${title}`), 'warning', { timeout: 7000 });
     try {
       if ('Notification' in window && Notification.permission === 'granted') {
-        const notification = new Notification(tr('异步任务到期', 'Follow-up due'), { body: title, tag: record.blockUuid });
+        const notification = new Notification(tr('异步任务到期', 'Follow-up due'), { body: title, tag: record.blockUuid, silent: !soundEnabled || played });
         notification.onclick = () => { view.showPanel(); logseq.showMainUI({ autoFocus: true }); };
       }
     } catch (_) { /* The in-app notification remains available. */ }
-    if (logseq.settings?.soundEnabled !== false) sound();
-    notifier?.enqueue(record);
   },
 });
 
-function sound() {
+function unlockAudio() {
+  if (logseq.settings?.soundEnabled === false) return;
   try {
-    const context = new (window.AudioContext || window.webkitAudioContext)();
-    const oscillator = context.createOscillator(), gain = context.createGain();
-    oscillator.connect(gain); gain.connect(context.destination); gain.gain.value = 0.12;
-    oscillator.frequency.value = 660; oscillator.start(); oscillator.stop(context.currentTime + 0.15);
-    oscillator.onended = () => context.close();
-  } catch (_) { /* Sound is optional. */ }
+    audioContext ??= new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state !== 'running') audioContext.resume().catch(() => {});
+  } catch (_) { /* The system notification can supply the sound. */ }
 }
+
+function playTone() {
+  if (audioContext?.state !== 'running') return false;
+  try {
+    const oscillator = audioContext.createOscillator(), gain = audioContext.createGain();
+    oscillator.connect(gain); gain.connect(audioContext.destination); gain.gain.value = 0.12;
+    oscillator.frequency.value = 660; oscillator.start(); oscillator.stop(audioContext.currentTime + 0.15);
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+    return true;
+  } catch (_) { return false; }
+}
+
+function armDeadline() {
+  if (!deadlineWorker) return;
+  const next = ready ? controller.nextDeadline() : null;
+  if (next === armedDeadline) return;
+  armedDeadline = next;
+  deadlineWorker.postMessage(next);
+}
+
 function pushEnabled() {
   return !!String(logseq.settings?.wecomWebhook || '').trim() &&
     (!logseq.settings?.botThisDeviceOnly || String(logseq.settings.botHostDeviceId || '').trim() === deviceId);
@@ -108,9 +138,9 @@ async function reconnect() {
     // A failed probe returns to the backoff loop, rather than queuing reads.
     await waitForDatabase(logseq, { attempts: 1, assertCurrent });
     assertCurrent();
-    await controller.refresh({ missed: true });
+    await controller.refresh();
     assertCurrent();
-    ready = true; reconnectAttempts = 0;
+    ready = true; armDeadline(); reconnectAttempts = 0;
     view.setBanner(tr('连接已恢复，列表已重新核对。', 'Connection restored; the list has been refreshed.'));
     if (saveOutcomePending) {
       saveOutcomePending = false;
@@ -124,6 +154,7 @@ async function activate() {
   const sequence = ++switching;
   activating = true; initialized = false; saveOutcomePending = false; clearTimeout(startupRetry); startupRetry = null;
   ready = false; notifier?.dispose(); notifier = null; controller.dispose();
+  pickerSequence++; inlineActions.clear(); inlineSlots.clear(); view.resetInteraction();
   clearTimeout(debounce); debounce = null; view.mode = null; view.panel = null; view.rows.clear(); view.selected.clear();
   view.banner = ''; view.notice = ''; logseq.hideMainUI();
   try {
@@ -145,7 +176,7 @@ async function activate() {
     });
     await controller.activate(graph.url, store);
     if (sequence !== switching || disposed) return;
-    ready = true; initialized = true; reconnectAttempts = 0;
+    ready = true; initialized = true; armDeadline(); reconnectAttempts = 0;
     if (controller.migrated) logseq.UI.showMsg(tr(`已升级 ${controller.migrated} 条提醒，原始计时值已保留。`,
       `Upgraded ${controller.migrated} reminders; original values retained.`), 'success');
     if (notifier.storageError) view.setBanner(tr('本机推送记录无法保存，重启后的去重可能失效。', 'Local delivery receipts could not be saved; deduplication across restarts may be unavailable.'));
@@ -154,16 +185,20 @@ async function activate() {
 }
 
 async function navigate(uuid) {
-  const block = await logseq.Editor.getBlock(uuid, { includePage: true });
+  const sequence = ++pickerSequence, epoch = controller.epoch;
+  const current = () => !disposed && sequence === pickerSequence && epoch === controller.epoch;
+  const block = await logseq.Editor.getBlock(uuid);
+  if (!current()) return;
   if (!block) throw new Error(tr('任务已被删除。', 'The task was deleted.'));
-  const page = block.page?.id ? await logseq.Editor.getPage(block.page.id) : block;
-  if (!page?.uuid) throw new Error(tr('找不到所在页面。', 'The containing page was not found.'));
-  logseq.hideMainUI(); view.mode = null;
-  await logseq.Editor.scrollToBlockInPage(page.uuid, uuid);
+  // DB graphs route directly to a node UUID. The SDK's legacy page-scroll
+  // helper uses block-content-* anchors, while 2.0.2 uses ls-block-*.
+  await logseq.App.pushState('page', { name: uuid });
+  if (!current()) return;
+  view.mode = null; logseq.hideMainUI();
 }
 
 async function run(action, uuid, options = {}) {
-  if (action === 'close') { view.mode = null; logseq.hideMainUI(); return; }
+  if (action === 'close') { pickerSequence++; view.mode = null; logseq.hideMainUI(); return; }
   if (!ready) throw new Error(tr('图谱正在加载或升级，请稍后重试。', 'Graph is loading or upgrading; try again shortly.'));
   if (action === 'navigate') return navigate(uuid);
   if (action === 'permission') {
@@ -191,29 +226,110 @@ async function run(action, uuid, options = {}) {
     return;
   }
   if (action === 'bulk') {
-    const epoch = controller.epoch;
+    const epoch = controller.epoch, sequence = pickerSequence;
     const expiresAt = ['tomorrow', 'weekday'].includes(options.preset) ? nextMorning(options.preset) : Date.now() + secondsFromMinutes(Number(options.preset)) * 1000;
     const selected = options.ids.map(id => [id, recordToken(controller.records.get(id))]);
     let succeeded = 0, failed = 0;
     for (const [id, expected] of selected) {
       controller.assert(epoch);
       try { await controller.act(id, 'schedule', { expiresAt, expected }); succeeded++; view.selected.delete(id); }
-      catch (_) { controller.assert(epoch); failed++; }
+      catch (error) {
+        controller.assert(epoch); failed++;
+        if (isDatabaseUnavailable(error)) { report(error); throw error; }
+      }
     }
+    if (sequence !== pickerSequence) return;
     view.setNotice(tr(`已延后 ${succeeded} 项${failed ? `；${failed} 项失败，保留选中，请刷新后重试` : ''}。`,
       `${succeeded} snoozed${failed ? `; ${failed} failed and remain selected. Refresh and retry` : ''}.`), failed > 0);
     return;
   }
-  await controller.act(uuid, action, options);
-  if (view.mode === 'picker' && action === 'schedule') { view.showPanel(); }
+  const sequence = pickerSequence, epoch = controller.epoch;
+  try { await controller.act(uuid, action, options); }
+  catch (error) {
+    if (error.code === 'REMINDER_CONFLICT' && epoch === controller.epoch) {
+      // A write based on the displayed record was rejected, not applied. Fetch
+      // the current one for an explicit retry; never replay the submitted edit.
+      try {
+        const latest = await controller.read(uuid);
+        if (sequence === pickerSequence && view.mode === 'picker' && view.pickerUuid === uuid) {
+          view.setPickerRecord(uuid, latest);
+        }
+      } catch (readError) { if (isDatabaseUnavailable(readError)) report(readError); throw readError; }
+    }
+    if (isDatabaseUnavailable(error)) report(error);
+    throw error;
+  }
+  if (sequence !== pickerSequence) return;
   view.setNotice(tr('已保存。可在操作历史中查看记录，或撤销上一步。', 'Saved. Review history or undo the last action.'));
 }
 
 async function openPicker(uuid, title) {
   if (!ready) throw new Error(tr('图谱正在加载或升级，请稍后重试。', 'Graph is loading or upgrading.'));
-  await controller.refresh();
-  view.showPicker(uuid, title, controller.records.get(uuid) || null);
+  const sequence = ++pickerSequence, epoch = controller.epoch;
+  const cached = controller.records.get(uuid) || null;
   logseq.showMainUI({ autoFocus: true });
+  view.showPicker(uuid, title || cached?.blockContent || tr('正在读取任务…', 'Loading task…'), cached);
+  // The form's expected token describes exactly what the user saw. A cached
+  // reminder is safe to edit now: commit compares it to the live graph first.
+  if (cached) return;
+  view.setPickerLoading(uuid);
+  const current = () => !disposed && sequence === pickerSequence && epoch === controller.epoch && view.mode === 'picker' && view.pickerUuid === uuid;
+  try {
+    const target = await controller.read(uuid, { withBlock: true });
+    if (!current()) return;
+    if (!target.exists) throw new Error(tr('任务已被删除。', 'The task was deleted.'));
+    view.setPickerRecord(uuid, target.record, title || target.title);
+  } catch (error) {
+    if (!current()) return;
+    view.setPickerError(uuid, error.message || String(error));
+    throw error;
+  }
+}
+
+function rememberSlot(uuid, slot) {
+  const previous = inlineSlots.get(slot);
+  const entry = previous?.uuid === uuid ? previous : { uuid };
+  inlineSlots.delete(slot); inlineSlots.set(slot, entry);
+  if (inlineSlots.size > MAX_INLINE_SLOTS) inlineSlots.delete(inlineSlots.keys().next().value);
+  return entry;
+}
+
+function paintSlot(slot, entry, force = false) {
+  const { uuid } = entry;
+  const busy = inlineActions.has(uuid), id = escapeHtml(uuid);
+  const done = controller.records.get(uuid)?.taskStatus === 'logseq.property/status.done';
+  const state = view.lang + (busy ? ':saving' : done ? ':done' : ':ready');
+  if (!force && entry.display === state) return;
+  entry.display = state;
+  // Logseq's provider keys are global, including when one block is rendered
+  // in both the journal and a linked reference. Each slot needs its own key.
+  const data = `data-uuid="${id}" data-slot="${escapeHtml(slot)}"`;
+  logseq.provideUI({ key: `async-task-timer-inline-${uuid}-${slot}`, slot, reset: true,
+    template: `<span aria-busy="${busy}"><button class="async-timer-inline-btn" ${data} data-on-click="changeInlineTimer" ${busy ? 'disabled' : ''}>⏱ ${tr('跟进', 'Follow up')}</button><button class="async-timer-inline-btn" ${data} data-on-click="completeInlineTimer" ${busy || done ? 'disabled' : ''}>${busy ? tr('保存中…', 'Saving…') : '✓ ' + (done ? tr('已完成', 'Completed') : tr('完成', 'Complete'))}</button></span>` });
+}
+
+function renderInline(uuid) {
+  for (const [slot, entry] of inlineSlots) if (entry.uuid === uuid) paintSlot(slot, entry);
+}
+
+function completeInline(uuid, slot) {
+  if (!ready) return;
+  if (slot) rememberSlot(uuid, slot);
+  if (inlineActions.has(uuid)) { renderInline(uuid); return inlineActions.get(uuid); }
+  if (controller.records.get(uuid)?.taskStatus === 'logseq.property/status.done') { renderInline(uuid); return; }
+  const epoch = controller.epoch;
+  const expected = recordToken(controller.records.get(uuid));
+  // The store checks this token against the database before writing.
+  const promise = Promise.resolve().then(async () => {
+    controller.assert(epoch);
+    await run('complete', uuid, { expected });
+  }).finally(() => {
+    if (epoch === controller.epoch && inlineActions.get(uuid) === promise) {
+      inlineActions.delete(uuid); renderInline(uuid);
+    }
+  });
+  inlineActions.set(uuid, promise); renderInline(uuid);
+  return promise;
 }
 
 const SETTINGS = [
@@ -260,17 +376,20 @@ async function main() {
   }));
   offHooks.push(logseq.App.onCurrentGraphChanged(activate));
   offHooks.push(logseq.App.onGraphAfterIndexed(() => { if (!ready && !activating && startupRetry === null) activate(); }));
-  for (const name of ['Async Timer', '异步任务计时']) logseq.Editor.registerSlashCommand(name, safe(async () => {
+  for (const name of ['Async Timer', '异步任务计时']) logseq.Editor.registerSlashCommand(name, safe(async (event = {}) => {
+    // 2.0.2 includes the originating UUID in the slash-command event.
+    if (event.uuid) return openPicker(event.uuid);
+    const sequence = pickerSequence, epoch = controller.epoch;
     const block = await logseq.Editor.getCurrentBlock();
-    if (block) await openPicker(block.uuid, await logseq.Editor.getEditingBlockContent() || block.title);
+    if (block && sequence === pickerSequence && epoch === controller.epoch) await openPicker(block.uuid, block.title);
   }));
   logseq.Editor.registerBlockContextMenuItem(tr('设置异步提醒', 'Set async reminder'), safe(async ({ uuid }) => {
-    const block = await logseq.Editor.getBlock(uuid); if (block) await openPicker(uuid, block.title);
+    await openPicker(uuid);
   }));
   logseq.provideModel({
     toggleTimerPanel: safe(async () => {
       if (!ready && initialized) {
-        view.showPanel(); logseq.showMainUI({ autoFocus: true });
+        logseq.showMainUI({ autoFocus: true }); view.showPanel();
         return;
       }
       if (activating) {
@@ -278,27 +397,42 @@ async function main() {
         return;
       }
       if (!ready) { await activate(); if (!ready) return; }
-      await controller.refresh(); view.showPanel(); logseq.showMainUI({ autoFocus: true });
+      pickerSequence++; logseq.showMainUI({ autoFocus: true }); view.showPanel();
+      await controller.refresh({ maxAge: debounce === null ? 5000 : 0 });
     }),
     changeInlineTimer: safe(async ({ dataset }) => {
-      const block = await logseq.Editor.getBlock(dataset.uuid); if (block) await openPicker(block.uuid, block.title);
+      await openPicker(dataset.uuid);
     }),
     completeInlineTimer: safe(async ({ dataset }) => {
-      if (!ready) return;
-      await controller.refresh();
-      await run('complete', dataset.uuid, { expected: recordToken(controller.records.get(dataset.uuid)) });
+      await completeInline(dataset.uuid, dataset.slot);
     }),
   });
   offHooks.push(logseq.App.onMacroRendererSlotted(({ slot, payload }) => {
     if (String(payload?.arguments?.[0] || '').trim().toLowerCase() !== INLINE_TIMER_RENDERER_TYPE || !payload.uuid) return;
-    const uuid = escapeHtml(payload.uuid);
-    logseq.provideUI({ key: `async-task-timer-inline-${uuid}`, slot, reset: true,
-      template: `<span><button class="async-timer-inline-btn" data-uuid="${uuid}" data-on-click="changeInlineTimer">⏱ ${tr('跟进', 'Follow up')}</button><button class="async-timer-inline-btn" data-uuid="${uuid}" data-on-click="completeInlineTimer">✓ ${tr('完成', 'Complete')}</button></span>` });
+    if (slot) paintSlot(slot, rememberSlot(payload.uuid, slot), true);
   }));
-  logseq.App.registerUIItem('toolbar', { key: 'timer-toolbar-btn', template: `<a class="button" data-on-click="toggleTimerPanel" title="Async Task Timer"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M22 6l-3-3M12 2v2"/></svg></a>` });
+  logseq.App.registerUIItem('toolbar', { key: 'timer-toolbar-btn', template: `<button type="button" class="button" data-on-click="toggleTimerPanel" title="Async Task Timer" aria-label="Async Task Timer"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M22 6l-3-3M12 2v2"/></svg></button>` });
+  document.addEventListener?.('pointerdown', unlockAudio, true);
+  document.addEventListener?.('keydown', unlockAudio, true);
+  if (typeof Worker !== 'undefined') {
+    try {
+      deadlineWorker = new Worker(deadlineWorkerUrl);
+      deadlineWorker.onmessage = async ({ data }) => {
+        if (!ready || disposed || data !== armedDeadline) return;
+        try {
+          await controller.tick();
+          await notifier?.process();
+        } catch (error) { report(error); }
+      };
+    } catch (_) { /* The regular tick also reconciles deadlines. */ }
+  }
   tick = setInterval(() => { if (ready) { view.tick(); controller.tick().catch(report); notifier?.process().catch(report); } }, 1000);
   poll = setInterval(() => { if (ready) controller.refresh().catch(report); }, 30000);
   logseq.beforeunload(async () => {
+    deadlineWorker?.terminate(); deadlineWorker = null;
+    document.removeEventListener?.('pointerdown', unlockAudio, true);
+    document.removeEventListener?.('keydown', unlockAudio, true);
+    audioContext?.close().catch(() => {});
     disposed = true; ready = false; switching++; controller.dispose(); notifier?.dispose();
     clearTimeout(debounce); clearTimeout(startupRetry); clearInterval(tick); clearInterval(poll);
     for (const off of offHooks) if (typeof off === 'function') off();
